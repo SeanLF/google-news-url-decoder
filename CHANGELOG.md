@@ -1,0 +1,91 @@
+# Changelog
+
+## 0.2.0
+
+Breaking. The five numbered decoders are removed and the minimum Python is 3.10. See
+[Migrating from 0.1.x](README.md#migrating-from-01x) for the mapping; `gnewsdecoder` is
+unchanged and most code needs no edit.
+
+### Fixed
+
+**A decoded URL could come back silently truncated.** The payload length inside an article
+token is a protobuf varint, but it was read as a single raw byte. That is only correct below
+128, so any embedded URL of 128 bytes or more lost its last character, and past 255 the length
+was wrong outright. Because the shortened value still began with `http` it was returned as a
+**successful** decode — so a caller received a broken link with no error to catch. News URLs
+with a slug and tracking parameters cross 128 bytes routinely. Affected `decoderv1`,
+`decoderv3` and `decoderv4` on 0.1.x.
+
+**Tokens from any host were decoded.** The guard read
+`hostname == "news.google.com" and path[-2] == "articles" or "read"`, which Python groups as
+`(... and ...) or "read"` — true for every URL. `decoderv2("https://evil.com/x/CBMiTOKEN")`
+returned decoded bytes instead of refusing. Closes #18.
+
+**A batch could hand an article another article's URL.** `decoderv4` paired request order with
+response order. The endpoint answers a batch in arbitrary order (measured returning tags
+`2, 4, 1, 3, 5` for five items), so results are now keyed by the tag that was sent. A missing
+result is reported against its own URL rather than shifting the ones after it.
+
+**`import googlenewsdecoder` failed without httpx.** `__init__` imported the async decoder
+while `setup.py` never required it. Using async without the extra now raises an error naming
+the extra, instead of a bare `ModuleNotFoundError` from three frames down.
+
+**A proxy on the async path silently did nothing.** A per-request proxy was forwarded as
+`extensions={"proxy": ...}`, which httpx accepts and ignores — httpcore reads the proxy the
+client was built with. Traffic went direct while the code read as though it were proxied.
+Passing a late proxy now raises and says how to construct the transport instead.
+
+**A timeout on the async path was dropped** when the caller supplied their own client.
+
+**Decompression is bounded and its errors are typed.** A ~1 MB gzipped response was measured
+expanding to 1 GB. A body whose declared encoding does not match its content used to raise
+`BadGzipFile`/`zlib.error`/`EOFError`, none of which a caller catching `TransportError` sees.
+
+**Oversized tokens are rejected before being decoded.** The token is the last path segment, so
+its size is caller-controlled.
+
+**The RSS fallback never ran.** `params_urls` offers two article-page URLs, but a page that
+parsed to nothing returned immediately instead of trying the second — so the documented
+fallback only fired on a transport exception, never on the case that needed it.
+
+### Changed
+
+- **Three layers you can enter at any level.** `protocol` is pure functions over strings with
+  no I/O and no third-party imports; `flow` is the algorithm as a generator; `transports` is
+  how bytes move. The sync and async decoders were 88% the same code and are now one
+  implementation with two drivers.
+- **A transport is any callable**, so your own client, session, retry policy, rate limiter or
+  tracing wrapper drops in. `requests` remains the default; `UrllibTransport` needs no
+  third-party dependency.
+- **`decode_batch`** shares one POST across many articles and returns results in input order.
+- **Dependencies are two**: `requests` and `selectolax`. `httpx` and `PySocks` moved to the
+  `[async]` and `[socks]` extras, having previously been listed as required.
+- **`python_requires` is 3.10**, up from 3.9 (end of security support: October 2025).
+- `get_decoding_params()` and `decode_url()` are no longer public methods; the same steps are
+  pure functions in `protocol`.
+
+### Added
+
+- CI: pytest across 3.10–3.14, a job that installs without extras, and ruff.
+- Tests run with sockets removed, so "no network" is enforced rather than promised.
+- `probes/` — the scripts behind the README's rate-limit claims, so they can be re-measured
+  rather than trusted. Excluded from the wheel and sdist.
+
+### Notes on rate limits
+
+Google throttles this endpoint **per IP address**, with no published limit, no `Retry-After`
+and no rate-limit headers. Three things measured, in case they save you the experiment:
+
+- It behaves as a **budget, not a rate**. Requests run clean until the budget is gone; pacing
+  them out does not raise the total. Spending it slowly buys nothing.
+- **Only the article-page GET counts.** Batching collapses the POSTs, so it saves round trips
+  without reducing exposure.
+- **How much you get depends on the address.** A residential connection fared several times
+  better than datacenter and VPN addresses in the same window.
+
+`transports.AdaptiveRateLimit` adjusts pacing in response to 429s rather than asking you to
+guess a number that would be wrong on a different host.
+
+## 0.1.7 and earlier
+
+See the commit history.
