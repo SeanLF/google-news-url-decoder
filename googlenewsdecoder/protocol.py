@@ -8,11 +8,15 @@ Decoding a Google News URL is four pure steps and two HTTP requests:
     -> decode_request(id, sig, ts)  I/O     POST them to batchexecute
     -> parse_decoded(body)          pure    pull the publisher URL out
 
-Everything here is a pure function over strings. Nothing in this module opens a
-socket, and it imports nothing outside the standard library, so the transport is
-the caller's choice: `requests`, `httpx`, `urllib`, or a recorded fixture in a
-test. `GoogleDecoder` and `GoogleDecoderAsync` are thin wrappers over these, and
-share them rather than each carrying its own copy of the algorithm.
+Everything here is a pure function over strings, and nothing in this module opens
+a socket, so the transport is the caller's choice: `requests`, `httpx`, `urllib`,
+or a recorded fixture in a test. `GoogleDecoder` and `GoogleDecoderAsync` are thin
+wrappers over these, and share them rather than each carrying a copy.
+
+Module scope imports only the standard library, so `import protocol` works on an
+interpreter with nothing installed. `parse_params` reaches for `selectolax` when
+it runs and falls back to a regex if it is absent -- the one third-party touch
+here, deliberately lazy so it cannot make the module unimportable.
 
 A `Request` says what to send without saying how to send it.
 """
