@@ -121,9 +121,7 @@ def unwrap_token(token: str) -> str | None:
     except Exception:
         return None
 
-    if decoded.startswith(_FRAME_TAG):
-        decoded = decoded[len(_FRAME_TAG) :]
-
+    decoded = decoded.removeprefix(_FRAME_TAG)
     read = _read_varint(decoded, 0)
     if read is None:
         return None
@@ -133,7 +131,15 @@ def unwrap_token(token: str) -> str | None:
         # The frame claims more than it carries. Returning the short read would be the same
         # silent truncation this function exists to have stopped doing.
         return None
-    return payload.decode("latin1")
+    try:
+        # A protobuf string field is UTF-8 by definition. Decoding it as latin-1 -- which the
+        # numbered decoders did, because they sliced a latin-1 string rather than bytes -- turns
+        # every non-ASCII URL into mojibake that still starts with "http": spiegel.de/münchen
+        # comes back as spiegel.de/mÃ¼nchen. Failing here is the right outcome for a payload
+        # that is not a valid string; the caller falls back to asking Google.
+        return payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def is_opaque_handle(unwrapped: str) -> bool:
@@ -148,21 +154,40 @@ def is_opaque_handle(unwrapped: str) -> bool:
     return unwrapped.startswith(_OPAQUE_HANDLE_PREFIX)
 
 
+def _is_plausible_url(candidate: str) -> bool:
+    """An http(s) URL with a host and nothing a header or a log line could be split on.
+
+    `startswith("http")` is not this check. It admits the bare string "http", it admits
+    "httpNOT-A-URL", and it admits embedded CRLF and NUL -- which matter because the result
+    is handed to whatever the caller does next, often an HTTP client or a log.
+    """
+    # `str.isprintable()` already excludes every control character, so an explicit CRLF/NUL
+    # check would be a subset of it written out longhand.
+    if not candidate.isprintable():
+        return False
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+
+
 def embedded_url(token: str) -> str | None:
     """The publisher URL carried inside the token itself, or None if the RPC is required.
 
-    When it returns a URL, both HTTP requests can be skipped. It rarely does: sampling
-    current feeds finds essentially only handles. Treat it as a free early exit, not as a
-    way to cut request volume. `probes/` has the check if you want to re-measure.
+    **The decode flows deliberately do not call this**, and you should think before you do.
+    The token is caller-supplied, so whatever comes out is the caller's own input, not
+    something Google vouched for. Skipping the RPC on the strength of it means trusting a
+    string that arrived with the URL you were asked to decode. It also buys very little:
+    sampling current feeds finds essentially only opaque handles, so it rarely fires at all.
 
-    The `is_opaque_handle` check is redundant with the `http` test that follows -- a handle
-    starts with `AU_yqL` and so can never pass it -- and is kept because the two questions
-    are genuinely different and callers ask both. See `is_opaque_handle`.
+    What is returned is validated as far as a URL can be without fetching it -- an http(s)
+    scheme, a host, and no control characters -- but "well-formed" is not "trustworthy".
     """
     unwrapped = unwrap_token(token)
     if unwrapped is None or is_opaque_handle(unwrapped):
         return None
-    return unwrapped if unwrapped.startswith("http") else None
+    return unwrapped if _is_plausible_url(unwrapped) else None
 
 
 def params_urls(token: str) -> tuple[str, ...]:

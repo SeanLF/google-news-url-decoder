@@ -14,3 +14,4 @@
 -e .[all]
 pytest>=8.0
 ruff>=0.16
+import-linter>=2.13   # enforces the module layering; contracts live in .importlinter

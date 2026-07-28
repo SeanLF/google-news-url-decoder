@@ -16,6 +16,11 @@ was wrong outright. Because the shortened value still began with `http` it was r
 with a slug and tracking parameters cross 128 bytes routinely. Affected `decoderv1`,
 `decoderv3` and `decoderv4` on 0.1.x.
 
+**Non-ASCII URLs came back as mojibake.** The payload is a protobuf string, which is UTF-8 by
+definition, but it was decoded as latin-1 — so `spiegel.de/münchen` became
+`spiegel.de/mÃ¼nchen`. Like the truncation above, the result still began with `http` and was
+reported as a success.
+
 **Tokens from any host were decoded.** The guard read
 `hostname == "news.google.com" and path[-2] == "articles" or "read"`, which Python groups as
 `(... and ...) or "read"` — true for every URL. `decoderv2("https://evil.com/x/CBMiTOKEN")`
@@ -64,9 +69,23 @@ fallback only fired on a transport exception, never on the case that needed it.
 - `get_decoding_params()` and `decode_url()` are no longer public methods; the same steps are
   pure functions in `protocol`.
 
+### Security
+
+**`decode()` never answers from the token itself.** Some tokens carry the publisher URL inline,
+and returning it would skip both HTTP requests. The token is caller-supplied, though, so doing
+that hands back a string that arrived with the input rather than one Google vouched for —
+`status: True`, nothing verified. Any value beginning `http` qualified, including URLs
+containing CRLF and hosts the caller did not expect, and Google's frame tag was not required.
+It also saved nothing measurable, since current feeds carry essentially only opaque handles.
+
+`protocol.embedded_url` remains public for callers who want to make that trade knowingly, and
+now validates what it returns: an http(s) scheme, a real host, and no control characters.
+
 ### Added
 
-- CI: pytest across 3.10–3.14, a job that installs without extras, and ruff.
+- CI: pytest across 3.10–3.14, a job that installs without extras, ruff, and `import-linter`
+  enforcing the module layering (`protocol` cannot import an HTTP client; the sync and async
+  decoders cannot import each other).
 - Tests run with sockets removed, so "no network" is enforced rather than promised.
 - `probes/` — the scripts behind the README's rate-limit claims, so they can be re-measured
   rather than trusted. Excluded from the wheel and sdist.

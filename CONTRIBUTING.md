@@ -1,9 +1,10 @@
 # Contributing
 
 ```sh
-pip install -r requirements.txt   # the package, plus pytest and ruff
+pip install -r requirements.txt   # the package, plus pytest, ruff and import-linter
 python -m pytest tests/ -q
 ruff check .
+lint-imports                      # the layering below, enforced
 ```
 
 Tests need no network and take under a second. If you want to check behaviour against live
@@ -20,8 +21,14 @@ modules keep them apart:
 | `flow` | the algorithm, as a generator that yields requests | `protocol` |
 | `transports` | how bytes actually move | `protocol` |
 
-The direction is one-way: `limits` ← `protocol` ← `transports` ← `flow` ← `decoder`. If a lower
-module needs something from a higher one, the dependency is pointing the wrong way — pass it in.
+The direction is one-way: `limits` ← `protocol` ← `transports` ← `flow` ← `decoder` /
+`decoder_async`. If a lower module needs something from a higher one, the dependency is pointing
+the wrong way — pass it in.
+
+**This is enforced, not just described.** `.importlinter` holds four contracts and `lint-imports`
+runs in CI: the layering above, `protocol` importing nothing else in the package, `protocol`
+importing no HTTP client at all, and the sync and async decoders staying independent of each
+other. Prose about architecture decays the first time someone adds a convenient import.
 
 This is the sans-I/O shape ([sans-io.readthedocs.io](https://sans-io.readthedocs.io)), the same
 one `h11` uses. The payoff is that the sync and async decoders stopped being two copies of one
@@ -69,7 +76,27 @@ and `*.egg-info` made `pip install` build an older tree than the source beside i
 patched code; and every test file put the checkout ahead of `site-packages`, so the CI job that
 installs the built artifact was still testing the source tree.
 
-`tests/conftest.py` now only adds the checkout to the path when the package is not installed.
+`tests/conftest.py` now picks a copy explicitly and refuses to run if it did not get the one
+asked for. By default that is the checkout, so your edits are what runs. `TEST_INSTALLED_PACKAGE=1`
+selects whatever pip installed, which is what CI uses to prove the built artifact works — and
+every run prints which one it got, because that was the fact nobody could see.
+
+Keying this off "is the package importable from anywhere" is what failed before: with the
+package installed, sabotaging the source tree still produced a fully green suite, and bare
+`pytest` and `python -m pytest` disagreed about the same code.
+
+### A token is not an answer
+
+Some article tokens carry the publisher URL inline, so `decode()` could return it without
+asking Google at all. The flows deliberately do not, and `protocol.embedded_url` carries the
+warning. The token arrives with the URL you were asked to decode — it is caller input, not
+something Google vouched for — so answering from it hands back a string someone else chose,
+with `status: True`, having verified nothing. Anything beginning `http` qualified, including
+URLs with CRLF in them and hosts nobody expected, and the frame tag was not even required.
+
+The fast path also bought nothing measurable: sampling current feeds finds essentially only
+opaque handles. An optimisation with no measured benefit and a new trust surface is a bad
+trade twice over.
 
 ### Probes must build requests with `protocol`
 
@@ -96,9 +123,13 @@ ceiling depends heavily on the address. Pacing does not raise the total.
 
 ## Style
 
-`ruff check .` is the whole of it; config in `ruff.toml`. `target-version` must track
-`python_requires` in `setup.py` — left at the default, the `UP` rules will propose `X | None`
-annotations that are a syntax error on the declared floor.
+`ruff check .` and `lint-imports`; config in `ruff.toml` and `.importlinter`. Ruff's
+`target-version` must track `python_requires` in `setup.py` — left at the default, the `UP` rules
+will propose `X | None` annotations that are a syntax error on the declared floor.
+
+Prefer the standard library to writing it out longhand. Recent examples from this repo:
+`bytes.removeprefix` for the frame tag, `str.isprintable()` instead of enumerating control
+characters, `dict.fromkeys` for order-preserving dedup.
 
 Comments here carry *why*, not what. Several record a decision that looks wrong until you know
 what it is avoiding — please keep those, and please delete any that a change makes untrue.

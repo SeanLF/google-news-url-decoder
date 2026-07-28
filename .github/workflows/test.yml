@@ -36,8 +36,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install ".[all]" pytest
 
-      - name: Run tests
-        run: pytest tests/ -q
+      - name: Run tests against the installed package
+        # From outside the repo root, and with the flag set, so conftest refuses to run if the
+        # checkout is imported instead. Without both, this job silently tests the source tree
+        # beside the artifact and proves nothing about the artifact.
+        working-directory: /tmp
+        env:
+          TEST_INSTALLED_PACKAGE: "1"
+        run: pytest "$GITHUB_WORKSPACE/tests" -q
 
   import-without-extras:
     name: import with no extras installed
@@ -52,7 +58,10 @@ jobs:
           python-version: "3.13"
       - run: pip install . pytest
       - name: The package must import, and async must name the extra when used
-        run: pytest tests/test_optional_extras.py -q
+        working-directory: /tmp
+        env:
+          TEST_INSTALLED_PACKAGE: "1"
+        run: pytest "$GITHUB_WORKSPACE/tests/test_optional_extras.py" -q
 
   lint:
     name: ruff
@@ -64,3 +73,16 @@ jobs:
           python-version: "3.13"
       - run: pip install ruff
       - run: ruff check .
+
+  architecture:
+    name: import-linter
+    runs-on: ubuntu-latest
+    # The layering is claimed in CONTRIBUTING and in the protocol docstring. A claim in prose
+    # decays the first time someone adds a convenient import; this makes it a build failure.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ".[all]" import-linter
+      - run: lint-imports

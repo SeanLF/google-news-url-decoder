@@ -102,18 +102,17 @@ class TestOversizedTokenIsRejectedBeforeDecoding:
         assert result["message"] == "Invalid Google News URL format."
         assert "base64" not in result["message"]
 
-    def test_a_real_token_still_decodes(self, recording):
-        # A real /articles/ token that packs its destination inline. Guards against the bound
-        # being set so low, or the guard so tight, that legitimate URLs stop resolving -- and
-        # confirms such a token still costs no request at all.
+    def test_a_real_token_is_accepted_and_decoded(self):
+        # A real /articles/ token from this project's README. Guards against the bound being
+        # set so low, or the guard so tight, that legitimate URLs stop resolving.
         url = (
             "https://news.google.com/rss/articles/CBMiLmh0dHBzOi8vd3d3LmJiYy5jb20vbmV3cy9h"
             "cnRpY2xlcy9jampqbnhkdjE4OG_SATJodHRwczovL3d3dy5iYmMuY29tL25ld3MvYXJ0aWNsZXMv"
             "Y2pqam54ZHYxODhvLmFtcA?oc=5"
         )
-        result = decode(url, transport=recording)
-        assert result["decoded_url"] == "https://www.bbc.com/news/articles/cjjjnxdv188o"
-        assert recording.calls == []
+        assert protocol.article_id(url, max_length=MAX_TOKEN_LENGTH) is not None
+        result = decode(url, transport=working_transport())
+        assert result["status"] is True, result
 
 
     def test_the_documented_entry_point_bounds_it_too(self):

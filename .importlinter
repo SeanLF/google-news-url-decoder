@@ -1,0 +1,65 @@
+# Architecture, enforced rather than described.
+#
+# CONTRIBUTING and the protocol docstring both claim a one-way layering. A claim in a docstring
+# decays the first time someone adds a convenient import; `lint-imports` in CI makes it a build
+# failure instead. Run it with:  lint-imports
+#
+# The `independence` and `forbidden` contracts below are the ones that carry real weight --
+# `protocol` staying free of I/O is the property the whole sans-I/O shape rests on.
+
+[importlinter]
+root_package = googlenewsdecoder
+# Required so the protocol-does-no-io contract can name third-party modules.
+include_external_packages = True
+
+[importlinter:contract:layers]
+name = Imports flow one way, from the entry point down to the pure core
+type = layers
+layers =
+    googlenewsdecoder.decoder | googlenewsdecoder.decoder_async
+    googlenewsdecoder.flow
+    googlenewsdecoder.transports
+    googlenewsdecoder.protocol
+    googlenewsdecoder.limits
+exhaustive = false
+
+[importlinter:contract:protocol-is-pure]
+name = protocol depends on nothing in this package but limits
+type = forbidden
+source_modules =
+    googlenewsdecoder.protocol
+forbidden_modules =
+    googlenewsdecoder.transports
+    googlenewsdecoder.flow
+    googlenewsdecoder.decoder
+    googlenewsdecoder.decoder_async
+
+[importlinter:contract:protocol-does-no-io]
+name = protocol imports no HTTP client, at module scope or otherwise
+# The point of the layer split. `protocol` is pure functions over strings, so it must not be
+# able to reach a socket even by accident; a transport is the caller's choice. selectolax is
+# permitted -- it parses markup, it does not fetch it -- and is imported lazily so the module
+# stays importable with nothing installed.
+type = forbidden
+source_modules =
+    googlenewsdecoder.protocol
+    googlenewsdecoder.limits
+forbidden_modules =
+    requests
+    httpx
+    aiohttp
+    socket
+    http
+# `urllib` is not listed: protocol uses urllib.parse, which is string manipulation. Only whole
+# top-level packages can be named here, so the socket-opening half cannot be forbidden
+# separately -- the layers contract and the no-network conftest cover that from the other side.
+
+[importlinter:contract:sync-and-async-stay-separate]
+name = The sync and async decoders never import each other
+# They were 88% the same code before `flow` existed. Sharing through `flow` is the fix; letting
+# one reach into the other would rebuild the coupling by a different route, and the drift would
+# start again from there.
+type = independence
+modules =
+    googlenewsdecoder.decoder
+    googlenewsdecoder.decoder_async

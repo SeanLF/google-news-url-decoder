@@ -56,16 +56,17 @@ def decode_flow(source_url: str, max_token_length: int | None = MAX_TOKEN_LENGTH
     if token is None:
         return {"status": False, "message": "Invalid Google News URL format."}
 
-    # Some tokens carry the publisher URL outright, and reading one costs nothing.
+    # NOT short-circuited on `protocol.embedded_url`, deliberately. Some tokens do carry the
+    # publisher URL inline, and answering from the token would skip both requests -- but the
+    # token is caller-supplied, so doing that makes `decode()` hand back the caller's own
+    # input as an authoritative answer. Anything beginning "http" would qualify, including a
+    # URL with CRLF in it or one pointing somewhere the caller did not expect, and it would
+    # come back with status True having asked Google nothing.
     #
-    # Do not expect this to fire often. The form is real -- it is the example in this
-    # project's own README -- but sampling current feeds finds essentially only opaque
-    # handles, so treat this as a free early exit rather than a way to cut request volume.
-    # Anyone sizing a request budget should assume every URL costs the full round trip.
-    embedded = protocol.embedded_url(token)
-    if embedded is not None:
-        return {"status": True, "decoded_url": embedded}
-
+    # The trade would be worth arguing about if it bought anything. It does not: sampling
+    # current feeds finds essentially only opaque handles, so the fast path would almost never
+    # fire. `protocol.embedded_url` remains available for callers who want to make that
+    # decision themselves; the library does not make it for them.
     params, last_error = yield from _fetch_params(token)
     if not params:
         return {"status": False, "message": last_error}
@@ -148,11 +149,7 @@ def decode_batch_flow(source_urls, max_token_length: int | None = MAX_TOKEN_LENG
         if token is None:
             results[position] = {"status": False, "message": "Invalid Google News URL format."}
             continue
-        # See decode_flow, including the note that this almost never fires on real tokens.
-        embedded = protocol.embedded_url(token)
-        if embedded is not None:
-            results[position] = {"status": True, "decoded_url": embedded}
-            continue
+        # See decode_flow on why this does not short-circuit on an inline URL.
         params, last_error = yield from _fetch_params(token)
         if not params:
             results[position] = {"status": False, "message": last_error}

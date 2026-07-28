@@ -34,13 +34,8 @@ def dedupe(tokens):
     token buys no information and costs the same as a new one. Feed every token list through
     this, including ones read from a file.
     """
-    seen, out = set(), []
-    for t in tokens:
-        t = t.strip()
-        if t and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
+    # dict preserves insertion order and dedupes, so fromkeys is the whole algorithm.
+    return [t for t in dict.fromkeys(s.strip() for s in tokens) if t]
 
 
 def fresh_tokens(query="world", limit=200):
