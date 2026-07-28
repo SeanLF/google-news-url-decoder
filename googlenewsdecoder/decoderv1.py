@@ -1,6 +1,8 @@
 import base64
 from urllib.parse import urlparse
 
+from .limits import MAX_TOKEN_LENGTH
+
 
 def decode_google_news_url(source_url: str) -> str:
     url = urlparse(source_url)
@@ -9,6 +11,7 @@ def decode_google_news_url(source_url: str) -> str:
         url.hostname == "news.google.com"
         and len(path) > 1
         and path[len(path) - 2] == "articles"
+        and len(path[len(path) - 1]) <= MAX_TOKEN_LENGTH
     ):
         base64_str = path[len(path) - 1]
         decoded_bytes = base64.urlsafe_b64decode(base64_str + "==")

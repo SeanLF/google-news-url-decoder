@@ -1,6 +1,8 @@
 import requests
 import base64
 
+from .limits import DEFAULT_TIMEOUT, MAX_TOKEN_LENGTH
+
 
 def fetch_decoded_batch_execute(ids: list) -> str:
     try:
@@ -24,6 +26,7 @@ def fetch_decoded_batch_execute(ids: list) -> str:
             url="https://news.google.com/_/DotsSplashUi/data/batchexecute?rpcids=Fbv4je",
             headers=headers,
             data={"f.req": s},
+            timeout=DEFAULT_TIMEOUT,
         )
 
         if response.status_code != 200:
@@ -59,6 +62,7 @@ def decode_google_news_url(source_urls: list) -> list:
                 url.hostname == "news.google.com"
                 and len(path) > 1
                 and (path[-2] == "articles" or path[-2] == "read")
+                and len(path[-1]) <= MAX_TOKEN_LENGTH
             ):
                 base64_str = path[-1]
                 decoded_bytes = base64.urlsafe_b64decode(base64_str + "==")

@@ -5,6 +5,8 @@ from urllib.parse import quote, urlparse
 import requests
 from selectolax.parser import HTMLParser
 
+from .limits import DEFAULT_TIMEOUT, MAX_TOKEN_LENGTH, clamp_interval
+
 
 def get_base64_str(source_url: str) -> dict:
     """
@@ -24,6 +26,7 @@ def get_base64_str(source_url: str) -> dict:
             url.hostname == "news.google.com"
             and len(path) > 1
             and path[-2] in ["articles", "read"]
+            and len(path[-1]) <= MAX_TOKEN_LENGTH
         ):
             return {"status": True, "base64_str": path[-1]}
         return {"status": False, "message": "Invalid Google News URL format."}
@@ -47,7 +50,7 @@ def get_decoding_params(base64_str: str) -> dict:
     # Try the first URL format.
     try:
         url = f"https://news.google.com/articles/{base64_str}"
-        response = requests.get(url)
+        response = requests.get(url, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
 
         parser = HTMLParser(response.text)
@@ -69,7 +72,7 @@ def get_decoding_params(base64_str: str) -> dict:
         # If an error occurs, try the fallback URL format.
         try:
             url = f"https://news.google.com/rss/articles/{base64_str}"
-            response = requests.get(url)
+            response = requests.get(url, timeout=DEFAULT_TIMEOUT)
             response.raise_for_status()
 
             parser = HTMLParser(response.text)
@@ -125,7 +128,10 @@ def decode_url(signature: str, timestamp: str, base64_str: str) -> dict:
         }
 
         response = requests.post(
-            url, headers=headers, data=f"f.req={quote(json.dumps([[payload]]))}"
+            url,
+            headers=headers,
+            data=f"f.req={quote(json.dumps([[payload]]))}",
+            timeout=DEFAULT_TIMEOUT,
         )
         response.raise_for_status()
 
@@ -174,7 +180,7 @@ def decode_google_news_url(source_url: str, interval: Optional[int] = None) -> d
             decoding_params_response["base64_str"],
         )
         if interval:
-            time.sleep(interval)
+            time.sleep(clamp_interval(interval))
 
         return decoded_url_response
     except Exception as e:

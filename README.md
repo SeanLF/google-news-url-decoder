@@ -1,170 +1,124 @@
-[![PyPI version](https://badge.fury.io/py/googlenewsdecoder.svg)](https://badge.fury.io/py/googlenewsdecoder)
-[![Python Versions](https://img.shields.io/badge/python-3.9%20|%203.10%20|%203.11%20|%203.12%20|%203.13-blue)](https://pypi.org/project/googlenewsdecoder/)
-[![Downloads](https://static.pepy.tech/badge/googlenewsdecoder)](https://pepy.tech/project/googlenewsdecoder)
-[![Downloads](https://static.pepy.tech/badge/googlenewsdecoder/week)](https://pepy.tech/project/googlenewsdecoder)
-
 # Google News Decoder
 
-Google News Decoder is a Python package that can decode Google News links or Google News URLs to their original URLs. It is a simple tool that saves you time and effort. If you find it useful, please support the package by hitting the star on GitHub. Your support helps keep the project going!
+Google News hides every article behind a redirect. A link in its RSS feed looks like
+`news.google.com/rss/articles/CBMiqwFBVV95cUxNMTRq...` and there is no way to tell from the
+URL whether it points at Reuters, the BBC, or a local paper. This library turns those links
+back into the publisher URLs they stand for.
 
-## Update
+That matters if you are aggregating news, deduplicating stories across sources, or showing
+readers where a link actually goes before they click it. Google publishes no API for this, so
+the work is a signature scrape followed by a call to an internal RPC — fiddly enough that it
+is worth having in one place rather than in every project that needs it.
 
-- **Version 0.1.7**:
-  - **New Feature**: Added **proxy support** to handle rate limiting and bypass restrictions.
-  - **Improved**: Enhanced error handling with a fallback mechanism for decoding parameters.
-  - **Refined**: Optimized `get_decoding_params` to try decoding via `https://news.google.com/articles` first, falling back to `https://news.google.com/rss/articles` if needed.
-  - **Updated**: Reduced occurrences of HTTP 429 (Too Many Requests).
-  - **Removed**: Logging functionality for a cleaner codebase.
-  - **Fixed**: Resolved time delay issue between requests.
+## What you get
 
-## Demo
+- **Batch decoding.** Many articles share a single POST instead of one each. Results come back
+  in the order you asked for them, which is not free: the endpoint answers a batch in an
+  arbitrary order (measured returning tags `2, 4, 1, 3, 5` for a five-item batch), so anything
+  pairing request order with response order hands each article another article's URL.
+- **Bring your own HTTP client.** A transport is any callable. `requests` is the default;
+  `urllib` ships as a zero-dependency option, `httpx` powers the async API, and your own
+  session, retry policy, rate limiter or tracing wrapper drops straight in.
+- **A protocol layer with no I/O in it.** `protocol` is pure functions over strings — what to
+  send and what a response means, importing nothing outside the standard library. Drive it
+  yourself if you would rather own the networking entirely.
+- **Sync and async share one implementation.** The algorithm lives in `flow` as a generator;
+  the two entry points differ only in which driver runs it.
 
-![Google News Decoder](https://github.com/user-attachments/assets/3a3c3279-1c54-4e19-96cb-6f22f889aa2a)
+## Example
 
-## Installation
+```python
+from googlenewsdecoder import decode, decode_batch
 
-You can install this package using pip:
+decode("https://news.google.com/rss/articles/CBMiqwFBVV95cUxNMTRq...")
+# {'status': True, 'decoded_url': 'https://www.reuters.com/world/europe/...'}
+
+results = decode_batch(urls)          # one POST per chunk, not one per article
+# [{'status': True, 'decoded_url': ...}, {'status': False, 'message': ...}]
+# same order as `urls`, always
+```
+
+Every call returns a dict rather than raising: `status` tells you whether it worked, and a
+failure carries a `message` explaining which step gave up.
+
+## Getting started
 
 ```sh
-pip install googlenewsdecoder
+pip install googlenewsdecoder            # sync decoding
+pip install googlenewsdecoder[async]     # adds httpx for decode_async
+pip install googlenewsdecoder[socks]     # adds PySocks for socks5:// proxies
 ```
 
-- You can upgrade this package using pip (upgrade to latest version):
+Decode a single URL:
+
+```python
+from googlenewsdecoder import decode
+
+result = decode(url, interval=1)         # interval paces a batch of calls
+if result["status"]:
+    print(result["decoded_url"])
+else:
+    print("could not decode:", result["message"])
+```
+
+Use a different HTTP client — anything callable that takes a request and returns the body:
+
+```python
+from googlenewsdecoder import decode
+from googlenewsdecoder.transports import UrllibTransport
+
+decode(url, transport=UrllibTransport())          # no third-party HTTP dependency
+decode(url, transport=my_session_backed_callable) # your pooling, retries, tracing
+```
+
+Async, which needs the `[async]` extra:
+
+```python
+from googlenewsdecoder import decode_async
+
+result = await decode_async(url)
+```
+
+## Rate limits
+
+Google throttles this endpoint per IP address and publishes no limit, no `Retry-After`, and no
+rate-limit headers. Two things are worth knowing before you build on it:
+
+- The **article-page fetch** is what draws the throttling. Batching collapses the POSTs, not
+  the fetches, so it reduces round trips without reducing your exposure.
+- How much you get **depends on the address**. The same code and pacing behaves very
+  differently from a residential connection than from a datacenter or VPN address.
+
+`transports.AdaptiveRateLimit` wraps any transport and adjusts its own pacing in response to
+429s, rather than asking you to guess a number that would be wrong on a different host.
+
+## Proxies
+
+```python
+decode(url, proxy="http://user:pass@host:port")
+decode(url, proxy="socks5://user:pass@host:port")   # needs the [socks] extra
+```
+
+SOCKS goes through `requests` and PySocks. `UrllibTransport` refuses a SOCKS proxy outright
+rather than quietly sending traffic direct, because urllib has no SOCKS support.
+
+## Layers
+
+Enter wherever suits you:
+
+| module | what it owns |
+|---|---|
+| `protocol` | pure functions: what to send, what a response means. No I/O. |
+| `flow` | the algorithm as a generator, plus a sync and an async driver |
+| `transports` | how bytes actually move — swappable, `requests` by default |
+
+## Contributing
+
+Tests run without a network — every HTTP entry point is substituted, so nothing depends on
+Google being reachable or on the decode contract of the day.
 
 ```sh
-pip install googlenewsdecoder --upgrade
+python -m pytest tests/ -q
 ```
 
-## Supported Proxy Formats
-
-- **HTTP/HTTPS Proxy**:
-
-  - **With authentication**: `http://user:pass@host:port` or `https://user:pass@host:port`
-  - **Without authentication**: `http://host:port` or `https://host:port`
-
-- **SOCKS5 Proxy**:
-
-  - **With authentication**: `socks5://user:pass@host:port`
-  - **Without authentication**: `socks5://host:port`
-
-- **IP and Port Only**:
-  - **HTTP**: `http://127.0.0.1:8080`
-  - **SOCKS5**: `socks5://127.0.0.1:1080`
-
-## Usage
-
-Here is an example of how to use this package with different decoders:
-
-### Using gnewsdecoder
-
-```python
-from googlenewsdecoder import gnewsdecoder
-
-def main():
-    interval_time = 1  # interval is optional, default is None
-
-    source_url = "https://news.google.com/read/CBMi2AFBVV95cUxPd1ZCc1loODVVNHpnbFFTVHFkTG94eWh1NWhTeE9yT1RyNTRXMVV2S1VIUFM3ZlVkVjl6UHh3RkJ0bXdaTVRlcHBjMWFWTkhvZWVuM3pBMEtEdlllRDBveGdIUm9GUnJ4ajd1YWR5cWs3VFA5V2dsZnY1RDZhVDdORHRSSE9EalF2TndWdlh4bkJOWU5UMTdIV2RCc285Q2p3MFA4WnpodUNqN1RNREMwa3d5T2ZHS0JlX0MySGZLc01kWDNtUEkzemtkbWhTZXdQTmdfU1JJaXY?hl=en-US&gl=US&ceid=US%3Aen"
-
-    try:
-        decoded_url = gnewsdecoder(source_url, interval=interval_time)
-
-        if decoded_url.get("status"):
-            print("Decoded URL:", decoded_url["decoded_url"])
-        else:
-            print("Error:", decoded_url["message"])
-    except Exception as e:
-        print(f"Error occurred: {e}")
-
-if __name__ == "__main__":
-    main()
-```
-
-### Using gnewsdecoder with proxy
-
-```python
-from googlenewsdecoder import gnewsdecoder
-
-def main():
-    interval_time = 1  # interval is optional, default is None
-    proxy = "http://user:pass@localhost:8080" # proxy is optional, default is None
-
-    source_url = "https://news.google.com/read/CBMi2AFBVV95cUxPd1ZCc1loODVVNHpnbFFTVHFkTG94eWh1NWhTeE9yT1RyNTRXMVV2S1VIUFM3ZlVkVjl6UHh3RkJ0bXdaTVRlcHBjMWFWTkhvZWVuM3pBMEtEdlllRDBveGdIUm9GUnJ4ajd1YWR5cWs3VFA5V2dsZnY1RDZhVDdORHRSSE9EalF2TndWdlh4bkJOWU5UMTdIV2RCc285Q2p3MFA4WnpodUNqN1RNREMwa3d5T2ZHS0JlX0MySGZLc01kWDNtUEkzemtkbWhTZXdQTmdfU1JJaXY?hl=en-US&gl=US&ceid=US%3Aen"
-
-    try:
-        decoded_url = gnewsdecoder(source_url, interval=interval_time, proxy=proxy)
-
-        if decoded_url.get("status"):
-            print("Decoded URL:", decoded_url["decoded_url"])
-        else:
-            print("Error:", decoded_url["message"])
-    except Exception as e:
-        print(f"Error occurred: {e}")
-
-if __name__ == "__main__":
-    main()
-```
-
-### Using a for loop to decode multiple URLs
-
-```python
-from googlenewsdecoder import gnewsdecoder
-
-def main():
-    interval_time = 1  # interval is optional, default is None
-
-    source_urls = [
-        "https://news.google.com/read/CBMilgFBVV95cUxOM0JJaFRwV2dqRDk5dEFpWmF1cC1IVml5WmVtbHZBRXBjZHBfaUsyalRpa1I3a2lKM1ZnZUI4MHhPU2sydi1nX3JrYU0xWjhLaHNfU0N6cEhOYVE2TEptRnRoZGVTU3kzZGJNQzc2aDZqYjJOR0xleTdsemdRVnJGLTVYTEhzWGw4Z19lR3AwR0F1bXlyZ0HSAYwBQVVfeXFMTXlLRDRJUFN5WHg3ZTI0X1F4SjN6bmFIck1IaGxFVVZyOFQxdk1JT3JUbl91SEhsU0NpQzkzRFdHSEtjVGhJNzY4ZTl6eXhESUQ3XzdWVTBGOGgwSmlXaVRmU3BsQlhPVjV4VWxET3FQVzJNbm5CUDlUOHJUTExaME5YbjZCX1NqOU9Ta3U?hl=en-US&gl=US&ceid=US%3Aen",
-        "https://news.google.com/read/CBMiiAFBVV95cUxQOXZLdC1hSzFqQVVLWGJVZzlPaDYyNjdWTURScV9BbVp0SWhFNzZpSWZxSzdhc0tKbVlHMU13NmZVOFdidFFkajZPTm9SRnlZMWFRZ01CVHh0dXU0TjNVMUxZNk9Ibk5DV3hrYlRiZ20zYkIzSFhMQVVpcTFPc00xQjhhcGV1aXM00gF_QVVfeXFMTmtFQXMwMlY1el9WY0VRWEh5YkxXbHF0SjFLQVByNk1xS3hpdnBuUDVxOGZCQXl1QVFXaUVpbk5lUGgwRVVVT25tZlVUVWZqQzc4cm5MSVlfYmVlclFTOUFmTHF4eTlfemhTa2JKeG14bmNabENkSmZaeHB4WnZ5dw?hl=en-US&gl=US&ceid=US%3Aen"
-    ]
-
-    for url in source_urls:
-        try:
-            decoded_url = gnewsdecoder(url, interval=interval_time)
-            if decoded_url.get("status"):
-                print("Decoded URL:", decoded_url["decoded_url"])
-            else:
-                print("Error:", decoded_url["message"])
-        except Exception as e:
-            print(f"Error occurred: {e}")
-
-if __name__ == "__main__":
-    main()
-```
-
-### Using a for loop to decode multiple URLs with Proxy
-
-```python
-from googlenewsdecoder import gnewsdecoder
-
-def main():
-    interval_time = 1  # interval is optional, default is None
-    proxy = "http://user:pass@localhost:8080" # proxy is optional, default is None
-
-    source_urls = [
-        "https://news.google.com/read/CBMilgFBVV95cUxOM0JJaFRwV2dqRDk5dEFpWmF1cC1IVml5WmVtbHZBRXBjZHBfaUsyalRpa1I3a2lKM1ZnZUI4MHhPU2sydi1nX3JrYU0xWjhLaHNfU0N6cEhOYVE2TEptRnRoZGVTU3kzZGJNQzc2aDZqYjJOR0xleTdsemdRVnJGLTVYTEhzWGw4Z19lR3AwR0F1bXlyZ0HSAYwBQVVfeXFMTXlLRDRJUFN5WHg3ZTI0X1F4SjN6bmFIck1IaGxFVVZyOFQxdk1JT3JUbl91SEhsU0NpQzkzRFdHSEtjVGhJNzY4ZTl6eXhESUQ3XzdWVTBGOGgwSmlXaVRmU3BsQlhPVjV4VWxET3FQVzJNbm5CUDlUOHJUTExaME5YbjZCX1NqOU9Ta3U?hl=en-US&gl=US&ceid=US%3Aen",
-        "https://news.google.com/read/CBMiiAFBVV95cUxQOXZLdC1hSzFqQVVLWGJVZzlPaDYyNjdWTURScV9BbVp0SWhFNzZpSWZxSzdhc0tKbVlHMU13NmZVOFdidFFkajZPTm9SRnlZMWFRZ01CVHh0dXU0TjNVMUxZNk9Ibk5DV3hrYlRiZ20zYkIzSFhMQVVpcTFPc00xQjhhcGV1aXM00gF_QVVfeXFMTmtFQXMwMlY1el9WY0VRWEh5YkxXbHF0SjFLQVByNk1xS3hpdnBuUDVxOGZCQXl1QVFXaUVpbk5lUGgwRVVVT25tZlVUVWZqQzc4cm5MSVlfYmVlclFTOUFmTHF4eTlfemhTa2JKeG14bmNabENkSmZaeHB4WnZ5dw?hl=en-US&gl=US&ceid=US%3Aen"
-    ]
-
-    for url in source_urls:
-        try:
-            decoded_url = gnewsdecoder(url, interval=interval_time, proxy=proxy)
-            if decoded_url.get("status"):
-                print("Decoded URL:", decoded_url["decoded_url"])
-            else:
-                print("Error:", decoded_url["message"])
-        except Exception as e:
-            print(f"Error occurred: {e}")
-
-if __name__ == "__main__":
-    main()
-```
-
-## Thank You
-
-Thank you for installing and using Google News Decoder! I hope this tool saves you time and effort when working with Google News URLs. If you find it useful, please consider hitting the star button on GitHub. If you’d like to contribute or fork the project, your support is greatly appreciated. Thank you for your support!
-
-## Credits
-
-- Original script by [huksley](https://gist.github.com/huksley/)
-
-![Visitors](https://api.visitorbadge.io/api/visitors?path=https%3A%2F%2Fgithub.com%2FSSujitX%2Fgoogle-news-url-decoder&countColor=%23263759&labelStyle=upper)
+MIT licensed.

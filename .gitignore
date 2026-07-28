@@ -14,3 +14,6 @@ build/
 *.egg-info/
 
 test.py
+.pytest_cache/
+gurls*.txt
+today.html
