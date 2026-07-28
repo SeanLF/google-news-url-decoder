@@ -8,10 +8,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import time
-import urllib.error
 
-from _common import classify, emit, fresh_tokens, get
+from _common import classify, emit, fresh_tokens, spend_until_refused
 
 LIMIT = int(os.environ.get("LIMIT", "80"))
 GAP = float(os.environ.get("GAP", "1.0"))
@@ -22,29 +20,22 @@ except Exception as e:
     emit(error=f"token fetch failed: {type(e).__name__}")
     raise SystemExit
 
-seq, first_consent, first_429 = [], None, None
-for i, tok in enumerate(tokens, 1):
-    try:
-        body, _ = get(f"https://news.google.com/articles/{tok}")
-    except urllib.error.HTTPError as e:
-        if e.code == 429:
-            first_429 = i
-            seq.append("429")
-            break
-        seq.append(f"http{e.code}")
-        continue
-    except Exception:
-        seq.append("err")
-        continue
+seq, first_consent = [], None
+
+def record(i, tok, body):
+    global first_consent
     kind = classify(body)
     seq.append(kind)
     if kind == "consent" and first_consent is None:
-        first_consent = i
-    time.sleep(GAP)
+        first_consent = i + 1
+
+clean, refused = spend_until_refused(tokens[:LIMIT], gap=GAP, on_each=record)
+if refused:
+    seq.append("429")
 
 emit(requests=len(seq),
      first_consent_at=first_consent,
-     first_429_at=first_429,
+     first_429_at=len(seq) if refused else None,
      articles=seq.count("article"),
      consents=seq.count("consent"),
      transitions="".join({"article": "a", "consent": "c", "429": "X"}.get(s, "?") for s in seq))

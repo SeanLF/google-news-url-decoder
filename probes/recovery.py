@@ -16,31 +16,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import time
 import urllib.error
 
-from _common import classify, emit, fresh_tokens, get
+from _common import emit, fresh_tokens, get, spend_until_refused
 
 POLL_S = int(os.environ.get("POLL_S", "30"))
 MAX_WAIT_S = int(os.environ.get("MAX_WAIT_S", "600"))
-
-
-def one_article(token):
-    body, _ = get(f"https://news.google.com/articles/{token}")
-    return classify(body)
-
-
-def spend_until_refused(tokens):
-    n = 0
-    for tok in tokens:
-        try:
-            one_article(tok)
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                return n
-            continue
-        except Exception:
-            continue
-        n += 1
-        time.sleep(0.4)
-    return None
 
 
 tokens = fresh_tokens(limit=200)
@@ -48,7 +27,8 @@ out = {}
 
 # Does a search feed still work once article GETs are refused? If the budget were shared,
 # the feed should be refused too.
-spent = spend_until_refused(tokens)
+spent, refused = spend_until_refused(tokens)
+spent = spent if refused else None
 out["gets_before_429"] = spent
 if spent is None:
     emit(note="never refused within the token supply", **out)
@@ -76,7 +56,7 @@ while waited < MAX_WAIT_S:
         out["note"] = "ran out of unspent tokens while polling for recovery"
         break
     try:
-        one_article(probe_token)
+        get(f"https://news.google.com/articles/{probe_token}")
         recovered_at = waited
         break
     except urllib.error.HTTPError as e:
@@ -92,6 +72,6 @@ out["gave_up_after_s"] = None if recovered_at else waited
 # If it came back, how much came back? Continue through the same iterator so this never
 # re-requests a token the first budget or the polling loop already paid for.
 if recovered_at:
-    out["gets_on_second_budget"] = spend_until_refused(list(poll_tokens))
+    out["gets_on_second_budget"] = spend_until_refused(list(poll_tokens))[0]
 
 emit(**out)

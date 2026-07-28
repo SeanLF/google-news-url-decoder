@@ -3,6 +3,8 @@ import gzip
 import json
 import os
 import re
+import time
+import urllib.error
 import urllib.request
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -58,6 +60,34 @@ def classify(body):
     if "Before you continue" in body or "consent.google" in body:
         return "consent"
     return "unknown"
+
+
+def spend_until_refused(tokens, gap=0.4, on_each=None):
+    """Fetch article pages until Google returns 429. Returns (n_clean, refused).
+
+    The one loop `degrade`, `mixed` and `recovery` all need. They kept private copies, and the
+    copies had already drifted on what to do with a non-429 HTTP error.
+
+    `on_each(index, token, body)` runs for every successful fetch -- that hook is where the three
+    probes genuinely differ: one classifies the body, one tracks request shape, one just counts.
+    Failures other than 429 are skipped rather than counted, since one dead article says nothing
+    about the budget.
+    """
+    clean = 0
+    for i, token in enumerate(tokens):
+        try:
+            body, _ = get(f"https://news.google.com/articles/{token}")
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                return clean, True
+            continue
+        except Exception:
+            continue
+        clean += 1
+        if on_each is not None:
+            on_each(i, token, body)
+        time.sleep(gap)
+    return clean, False
 
 
 def emit(**fields):

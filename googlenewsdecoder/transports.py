@@ -41,6 +41,28 @@ caching, rate limiting and logging are all just another transport:
         return transport
 
     GoogleDecoder(transport=with_retries(RequestsTransport()))
+
+Retrying is not always the right answer to a 429 here. Where the limit behaves as a per-address
+*budget* rather than a rate -- see `probes/` -- backing off and trying again does not recover it,
+so a caller decoding many URLs usually wants to stand down for the rest of the batch instead.
+The same seam expresses that, by turning the status into an exception of your own:
+
+    class RateLimited(Exception):
+        pass
+
+    def stop_on_429(inner):
+        def transport(request, **kw):
+            try:
+                return inner(request, **kw)
+            except TransportError as e:
+                if e.status == 429:
+                    raise RateLimited from e
+                raise
+        return transport
+
+Worth doing at the transport rather than on the result: by the time the flow has turned a
+TransportError into `{"status": False, "message": ...}`, the only thing left to key off is prose.
+`RateLimited` is not a TransportError, so it propagates out of `drive` to your loop untouched.
 """
 
 from typing import Protocol, runtime_checkable
