@@ -17,8 +17,8 @@ This is the sans-I/O shape (sans-io.readthedocs.io), the same one `h11` uses.
 
 
 from . import protocol
+from .errors import TransportError
 from .limits import MAX_TOKEN_LENGTH
-from .transports import TransportError
 
 
 def _fetch_params(token: str):

@@ -4,11 +4,15 @@
     decode("https://news.google.com/rss/articles/CBMi...")
     # {"status": True, "decoded_url": "https://www.reuters.com/..."}
 
-The package is three layers, and you can enter at any of them:
+The package is layered, and you can enter at any level:
 
+    errors      TransportError, the vocabulary shared across the seam
     protocol    pure functions over strings; no I/O, standard library only
     flow        the algorithm as a generator that yields requests
     transports  how requests actually get sent -- swappable, defaults to `requests`
+
+`protocol` and `flow` do not import `transports`, so bringing your own I/O means importing
+none of this package's HTTP code. That is checked in CI; see `.importlinter`.
 
 Bring your own HTTP client by passing anything callable::
 
@@ -31,10 +35,11 @@ from .decoder import GoogleDecoder
 # so the async API is importable everywhere and only *using* it without the extra fails --
 # with a message from HttpxAsyncTransport naming the extra.
 from .decoder_async import GoogleDecoderAsync
+from .errors import TransportError
 from .flow import decode_batch_flow, decode_flow, drive, drive_async
 from .limits import DEFAULT_TIMEOUT
 from .protocol import Request
-from .transports import RequestsTransport, Transport, TransportError, UrllibTransport
+from .transports import RequestsTransport, Transport, UrllibTransport
 
 
 def decode(source_url: str, *, transport=None, proxy: str | None = None, interval: int | None = None) -> dict:

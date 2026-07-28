@@ -17,18 +17,21 @@ modules keep them apart:
 
 | module | owns | may import |
 |---|---|---|
-| `protocol` | what to send and what a response means. Pure functions over strings. | standard library only, at module scope |
-| `flow` | the algorithm, as a generator that yields requests | `protocol` |
-| `transports` | how bytes actually move | `protocol` |
+| `errors`, `limits` | the vocabulary of the seam, and the bounds | nothing in this package |
+| `protocol` | what to send and what a response means. Pure functions over strings. | `errors`, `limits` |
+| `flow` | the algorithm, as a generator that yields requests | `protocol`, `errors` |
+| `transports` | how bytes actually move | `protocol`, `errors` |
 
-The direction is one-way: `limits` ← `protocol` ← `transports` ← `flow` ← `decoder` /
-`decoder_async`. If a lower module needs something from a higher one, the dependency is pointing
-the wrong way — pass it in.
+`flow` and `transports` are siblings, not stacked: **neither imports the other.** That is what
+makes "bring your own I/O" real rather than nominal. `TransportError` sits in `errors` for
+exactly this reason — while it lived in `transports`, a caller replacing `transports` still had
+to import `transports` to get the exception they were required to raise.
 
-**This is enforced, not just described.** `.importlinter` holds four contracts and `lint-imports`
-runs in CI: the layering above, `protocol` importing nothing else in the package, `protocol`
-importing no HTTP client at all, and the sync and async decoders staying independent of each
-other. Prose about architecture decays the first time someone adds a convenient import.
+**This is enforced, not just described.** `.importlinter` holds five contracts and
+`lint-imports` runs in CI: the layer order, `flow` and `protocol` not importing `transports`,
+`protocol` importing nothing else in the package, `protocol` importing no HTTP client at all,
+and the sync and async decoders staying independent. Prose about architecture decays the first
+time someone adds a convenient import.
 
 This is the sans-I/O shape ([sans-io.readthedocs.io](https://sans-io.readthedocs.io)), the same
 one `h11` uses. The payoff is that the sync and async decoders stopped being two copies of one

@@ -17,11 +17,24 @@ name = Imports flow one way, from the entry point down to the pure core
 type = layers
 layers =
     googlenewsdecoder.decoder | googlenewsdecoder.decoder_async
-    googlenewsdecoder.flow
-    googlenewsdecoder.transports
+    googlenewsdecoder.flow | googlenewsdecoder.transports
     googlenewsdecoder.protocol
-    googlenewsdecoder.limits
+    googlenewsdecoder.errors | googlenewsdecoder.limits
 exhaustive = false
+
+[importlinter:contract:the-algorithm-owns-no-io]
+name = flow does not import transports
+# The claim the three-layer shape rests on: you can drive the algorithm with your own I/O and
+# never touch this package's transports. That was almost true -- `flow` imported `transports`
+# solely to name `TransportError`, so a caller replacing `transports` still had to import it to
+# get the exception they were required to raise. The error type now lives in `errors`, a leaf
+# both sides depend on, and this contract stops the import coming back.
+type = forbidden
+source_modules =
+    googlenewsdecoder.flow
+    googlenewsdecoder.protocol
+forbidden_modules =
+    googlenewsdecoder.transports
 
 [importlinter:contract:protocol-is-pure]
 name = protocol depends on nothing in this package but limits

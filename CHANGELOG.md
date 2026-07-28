@@ -62,6 +62,11 @@ fallback only fired on a transport exception, never on the case that needed it.
 - **A transport is any callable**, so your own client, session, retry policy, rate limiter or
   tracing wrapper drops in. `requests` remains the default; `UrllibTransport` needs no
   third-party dependency.
+- **`TransportError` moved to `googlenewsdecoder.errors`**, and is still importable from
+  `googlenewsdecoder` and from `googlenewsdecoder.transports` as before. It is the vocabulary
+  shared by the algorithm and whatever performs the I/O, so it belongs to neither: while it
+  lived in `transports`, writing your own driver meant importing the very module you were
+  replacing. `protocol` and `flow` now import no transport at all.
 - **`decode_batch`** shares one POST across many articles and returns results in input order.
 - **Dependencies are two**: `requests` and `selectolax`. `httpx` and `PySocks` moved to the
   `[async]` and `[socks]` extras, having previously been listed as required.

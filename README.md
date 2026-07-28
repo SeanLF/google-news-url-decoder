@@ -134,6 +134,11 @@ Enter wherever suits you:
 | `protocol` | pure functions: what to send, what a response means. No I/O. |
 | `flow` | the algorithm as a generator, plus a sync and an async driver |
 | `transports` | how bytes actually move — swappable, `requests` by default |
+| `errors` | `TransportError`, the vocabulary both sides of the seam share |
+
+`protocol`, `flow` and `errors` do not import `transports`, so you can drive the algorithm with
+your own I/O without touching this package's HTTP code at all. That is checked in CI rather
+than promised — see `.importlinter`.
 
 ## Contributing
 

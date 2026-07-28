@@ -45,8 +45,22 @@ caching, rate limiting and logging are all just another transport:
 
 from typing import Protocol, runtime_checkable
 
+# Re-exported, not defined here: `TransportError` moved to `errors` so that `flow` can name it
+# without importing this module. Kept importable from here because it always has been.
+from .errors import TransportError
 from .limits import MAX_RESPONSE_BYTES
 from .protocol import Request
+
+__all__ = [
+    "DEFAULT_COOKIE",
+    "DEFAULT_USER_AGENT",
+    "AdaptiveRateLimit",
+    "HttpxAsyncTransport",
+    "RequestsTransport",
+    "Transport",
+    "TransportError",
+    "UrllibTransport",
+]
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -64,18 +78,6 @@ DEFAULT_USER_AGENT = (
 # addresses that are not walled (checked: identical response with and without), so it stays
 # as a cheap best-effort -- but do not treat the interstitial as solved.
 DEFAULT_COOKIE = "CONSENT=YES+cb.20210328-17-p0.en+FX+000"
-
-
-class TransportError(Exception):
-    """A transport-level failure, independent of which client produced it.
-
-    `status` carries the HTTP status when there was one, so a caller can back off on 429
-    and skip on 404 without knowing which library did the sending.
-    """
-
-    def __init__(self, message: str, status: int | None = None):
-        super().__init__(message)
-        self.status = status
 
 
 @runtime_checkable
