@@ -1,0 +1,8 @@
+# The wheel only ever contains the package. The sdist is the one that picks up stray files,
+# so the development directories are pruned explicitly -- `probes/` runs against live Google
+# and must not travel with an install.
+prune tests
+prune probes
+prune .github
+exclude ruff.toml
+exclude requirements.txt

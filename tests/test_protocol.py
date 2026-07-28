@@ -7,11 +7,7 @@ part that needs no I/O to test.
 """
 
 import json
-import sys
-from pathlib import Path
 from urllib.parse import parse_qs, unquote
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 

@@ -43,7 +43,7 @@ caching, rate limiting and logging are all just another transport:
     GoogleDecoder(transport=with_retries(RequestsTransport()))
 """
 
-from typing import Optional, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from .limits import MAX_RESPONSE_BYTES
 from .protocol import Request
@@ -73,7 +73,7 @@ class TransportError(Exception):
     and skip on 404 without knowing which library did the sending.
     """
 
-    def __init__(self, message: str, status: Optional[int] = None):
+    def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
         self.status = status
 
@@ -82,7 +82,7 @@ class TransportError(Exception):
 class Transport(Protocol):
     """The contract a transport satisfies. Structural: implement the call, that is all."""
 
-    def __call__(self, request: Request, *, timeout: Optional[float] = None, proxy: Optional[str] = None) -> str: ...
+    def __call__(self, request: Request, *, timeout: float | None = None, proxy: str | None = None) -> str: ...
 
 
 class _HeaderMixin:
@@ -107,10 +107,10 @@ class RequestsTransport(_HeaderMixin):
     request; pass a `Session`-backed transport instead if you want connection pooling.
     """
 
-    def __init__(self, headers: Optional[dict] = None):
+    def __init__(self, headers: dict | None = None):
         self.headers = headers
 
-    def __call__(self, request: Request, *, timeout: Optional[float] = None, proxy: Optional[str] = None) -> str:
+    def __call__(self, request: Request, *, timeout: float | None = None, proxy: str | None = None) -> str:
         import requests
 
         proxies = {"http": proxy, "https": proxy} if proxy else None
@@ -139,14 +139,12 @@ class UrllibTransport(_HeaderMixin):
     this does not.
     """
 
-    def __init__(self, headers: Optional[dict] = None):
+    def __init__(self, headers: dict | None = None):
         self.headers = headers
 
-    def __call__(self, request: Request, *, timeout: Optional[float] = None, proxy: Optional[str] = None) -> str:
-        import gzip
+    def __call__(self, request: Request, *, timeout: float | None = None, proxy: str | None = None) -> str:
         import urllib.error
         import urllib.request
-        import zlib
 
         # urllib has no SOCKS support: ProxyHandler would connect to the proxy host and
         # speak HTTP at it, failing with a confusing "connection reset" rather than saying
@@ -193,15 +191,37 @@ class HttpxAsyncTransport(_HeaderMixin):
     serve many in-flight decodes.
     """
 
-    def __init__(self, client=None, proxy: Optional[str] = None, headers: Optional[dict] = None):
-        import httpx
+    def __init__(self, client=None, proxy: str | None = None, headers: dict | None = None):
+        # This is the only place httpx is genuinely required, so it is the only place that can
+        # say so usefully. Guarding the import in `__init__.py` instead did nothing: the module
+        # imports fine without httpx, so the sentinel it set was never reached and callers got
+        # a bare "No module named 'httpx'" from three frames down.
+        try:
+            import httpx
+        except ImportError as e:
+            raise ImportError(
+                "async decoding requires httpx: pip install googlenewsdecoder[async] "
+                "-- or pass your own async transport, which needs no extra at all"
+            ) from e
 
         self.headers = headers
+        self._proxy = proxy
         self._client = client or httpx.AsyncClient(proxy=proxy, follow_redirects=True)
         self._owns_client = client is None
 
-    async def __call__(self, request: Request, *, timeout: Optional[float] = None, proxy: Optional[str] = None) -> str:
+    async def __call__(self, request: Request, *, timeout: float | None = None, proxy: str | None = None) -> str:
         import httpx
+
+        # httpx binds a proxy to the client at construction: httpcore's pool reads `self._proxy`
+        # and never looks at request extensions, so there is no per-request override to forward
+        # a late `proxy` to. An earlier version passed `extensions={"proxy": ...}`, which httpx
+        # accepts and ignores -- egress silently went direct while the code looked correct.
+        # Refuse instead, since a proxy that quietly does nothing is the worst of the options.
+        if proxy and proxy != self._proxy:
+            raise TransportError(
+                "HttpxAsyncTransport cannot change proxy per request; httpx binds it to the "
+                f"client. Construct HttpxAsyncTransport(proxy={proxy!r}) instead."
+            )
 
         try:
             response = await self._client.request(
@@ -209,10 +229,9 @@ class HttpxAsyncTransport(_HeaderMixin):
                 request.url,
                 headers=self._headers(request),
                 content=request.body,
-                # Both were accepted and silently dropped: a caller supplying their own client
-                # got no timeout and unproxied traffic, failing open in both cases.
+                # timeout was accepted and silently dropped, so a caller supplying their own
+                # client got no timeout at all. Passing it through fixes that.
                 **({"timeout": timeout} if timeout is not None else {}),
-                **({"extensions": {"proxy": proxy}} if proxy and self._owns_client is False else {}),
             )
             response.raise_for_status()
             return response.text
@@ -270,7 +289,7 @@ class AdaptiveRateLimit:
         self._streak = 0
         self._lock = threading.Lock()
 
-    def __call__(self, request: Request, *, timeout: Optional[float] = None, proxy: Optional[str] = None) -> str:
+    def __call__(self, request: Request, *, timeout: float | None = None, proxy: str | None = None) -> str:
         import random
 
         for attempt in range(self.retries):

@@ -17,12 +17,18 @@ share them rather than each carrying its own copy of the algorithm.
 A `Request` says what to send without saying how to send it.
 """
 
+import base64
 import json
 import re
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 from urllib.parse import quote, urlparse
 
 BATCHEXECUTE_URL = "https://news.google.com/_/DotsSplashUi/data/batchexecute"
+
+# The protobuf tag the frame opens with, and what an unwrapped token starts with when it is
+# a handle rather than a URL.
+_FRAME_TAG = bytes([0x08, 0x13, 0x22])
+_OPAQUE_HANDLE_PREFIX = "AU_yqL"
 
 # Opaque scaffold for the garturlreq RPC. The only variable fields are the
 # article id, timestamp and signature. Note the THREE levels of array nesting in
@@ -50,10 +56,10 @@ class Request(NamedTuple):
     method: str
     url: str
     headers: dict
-    body: Optional[bytes] = None
+    body: bytes | None = None
 
 
-def article_id(source_url: str, max_length: Optional[int] = None) -> Optional[str]:
+def article_id(source_url: str, max_length: int | None = None) -> str | None:
     """The opaque article token from a Google News URL, or None if it is not one.
 
     `max_length` bounds the token before any caller base64-decodes it; the
@@ -75,6 +81,86 @@ def article_id(source_url: str, max_length: Optional[int] = None) -> Optional[st
     return token
 
 
+def _read_varint(data: bytes, position: int) -> tuple[int, int] | None:
+    """(value, next_position) for the protobuf varint at `position`, or None if malformed.
+
+    Seven bits per byte, little-endian, with the top bit marking "another byte follows".
+    """
+    value = shift = 0
+    while position < len(data):
+        byte = data[position]
+        position += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, position
+        shift += 7
+        if shift > 63:  # a length this large is malformed, not merely big
+            return None
+    return None
+
+
+def unwrap_token(token: str) -> str | None:
+    """The string packed inside an article token, or None if it does not unpack.
+
+    The token is base64 around a protobuf frame: a tag, a varint length, then that many
+    bytes. What comes out is either the publisher URL outright, or an opaque handle
+    beginning `AU_yqL` that only batchexecute can resolve -- `embedded_url` tells them apart.
+
+    Pure and offline. Four separate copies of this used to live in the decoder modules, and
+    all four read the length as a single raw byte. That is only correct below 128: above it
+    the varint is two bytes, so every longer payload came back a character short, and above
+    255 the length was wrong outright. The result still began with "http", so it was returned
+    as a successful decode rather than an error -- a truncated URL reported as the answer.
+    """
+    try:
+        decoded = base64.urlsafe_b64decode(token + "==")
+    except Exception:
+        return None
+
+    if decoded.startswith(_FRAME_TAG):
+        decoded = decoded[len(_FRAME_TAG) :]
+
+    read = _read_varint(decoded, 0)
+    if read is None:
+        return None
+    length, start = read
+    payload = decoded[start : start + length]
+    if len(payload) != length:
+        # The frame claims more than it carries. Returning the short read would be the same
+        # silent truncation this function exists to have stopped doing.
+        return None
+    return payload.decode("latin1")
+
+
+def is_opaque_handle(unwrapped: str) -> bool:
+    """Whether an unwrapped token still needs the batchexecute round trip.
+
+    Distinct from `embedded_url() is None`, which is also true for a token that unwraps to
+    something that is neither a handle nor a URL. The flows do not currently use the
+    distinction -- they attempt the RPC whenever no URL was found, including for that third
+    case -- so this exists for callers doing their own triage, not as an optimisation the
+    library already makes.
+    """
+    return unwrapped.startswith(_OPAQUE_HANDLE_PREFIX)
+
+
+def embedded_url(token: str) -> str | None:
+    """The publisher URL carried inside the token itself, or None if the RPC is required.
+
+    When it returns a URL, both HTTP requests can be skipped. It rarely does: sampling
+    current feeds finds essentially only handles. Treat it as a free early exit, not as a
+    way to cut request volume. `probes/` has the check if you want to re-measure.
+
+    The `is_opaque_handle` check is redundant with the `http` test that follows -- a handle
+    starts with `AU_yqL` and so can never pass it -- and is kept because the two questions
+    are genuinely different and callers ask both. See `is_opaque_handle`.
+    """
+    unwrapped = unwrap_token(token)
+    if unwrapped is None or is_opaque_handle(unwrapped):
+        return None
+    return unwrapped if unwrapped.startswith("http") else None
+
+
 def params_urls(token: str) -> tuple[str, ...]:
     """Article-page URLs to try, in order, to obtain the signature and timestamp.
 
@@ -94,7 +180,7 @@ def params_request(url: str) -> Request:
     return Request("GET", url, {})
 
 
-def parse_params(html: str) -> Optional[tuple[str, str]]:
+def parse_params(html: str) -> tuple[str, str] | None:
     """(signature, timestamp) scraped from an article page, or None.
 
     Uses a real HTML parser when one is installed. The regex fallback below agreed with it
@@ -205,7 +291,7 @@ def parse_batch_decoded(body: str) -> dict:
     return found
 
 
-def parse_decoded(body: str) -> Optional[str]:
+def parse_decoded(body: str) -> str | None:
     """The publisher URL from a batchexecute response, or None if absent."""
     try:
         payload = json.loads(body.split("\n\n")[1])[:-2]

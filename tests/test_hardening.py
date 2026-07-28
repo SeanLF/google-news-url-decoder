@@ -6,19 +6,17 @@ Run with:  python -m pytest tests/ -q
 """
 
 import time
-import types
 
 import pytest
 
-# these public names are the decode functions themselves, not modules (see __init__.py)
-from googlenewsdecoder import decoderv1, decoderv2, decoderv3, decoderv4
+from googlenewsdecoder import decode, decode_batch, protocol
+from googlenewsdecoder.decoder import GoogleDecoder
 from googlenewsdecoder.limits import (
     DEFAULT_TIMEOUT,
     MAX_INTERVAL,
     MAX_TOKEN_LENGTH,
     clamp_interval,
 )
-from googlenewsdecoder.new_decoderv2 import GoogleDecoder
 
 GOOGLE_URL = "https://news.google.com/rss/articles/CBMiSHORTTOKEN?oc=5"
 OTHER_HOST_URL = "https://evil.com/fakepath/CBMiSHORTTOKEN"
@@ -66,60 +64,61 @@ def working_transport(body=""):
 
 class TestHostnameIsChecked:
     """The guard read `hostname == "news.google.com" and path[-2] == "articles" or "read"`,
-    which groups as `(... and ...) or "read"` and so was true for every URL."""
+    which groups as `(... and ...) or "read"` and so was true for every URL. Now one guard,
+    in `protocol.article_id`, rather than a copy per decoder."""
 
-    def test_v2_leaves_a_url_from_another_host_undecoded(self):
-        assert decoderv2(OTHER_HOST_URL) == OTHER_HOST_URL
+    def test_a_url_from_another_host_is_refused(self):
+        assert protocol.article_id(OTHER_HOST_URL) is None
+        assert decode(OTHER_HOST_URL)["status"] is False
 
-    def test_v3_rejects_a_url_from_another_host(self):
-        assert decoderv3(OTHER_HOST_URL)["status"] is False
+    def test_the_refusal_happens_before_any_request(self, recording):
+        assert decode(OTHER_HOST_URL, transport=recording)["status"] is False
+        assert recording.calls == [], "a foreign host must not cost a request"
 
-    def test_v2_still_decodes_read_paths(self):
+    def test_read_paths_are_still_accepted(self):
         # the `or "read"` was meant to accept /read/ alongside /articles/; keep that working
-        url = "https://news.google.com/read/" + "A" * 32
-        assert decoderv2(url) != url
+        assert protocol.article_id("https://news.google.com/read/" + "A" * 32) is not None
 
 
 class TestOversizedTokenIsRejectedBeforeDecoding:
     """The token is the last path segment, so its size is caller-controlled. Decoding it
     unbounded lets a multi-megabyte URL force a matching allocation."""
 
-    def test_v1_returns_the_source_url_untouched(self):
-        assert decoderv1(OVERSIZED_URL) == OVERSIZED_URL
+    def test_the_token_is_refused_before_it_is_decoded(self):
+        assert protocol.article_id(OVERSIZED_URL, max_length=MAX_TOKEN_LENGTH) is None
 
-    def test_v2_returns_the_source_url_untouched(self):
-        assert decoderv2(OVERSIZED_URL) == OVERSIZED_URL
-
-    # v3 and v4 wrap everything in `except Exception`, so asserting only that status is
-    # False cannot tell "rejected by the length check" from "blew up inside b64decode and
-    # got swallowed". Assert on which one it was: rejected at the URL guard means the
-    # decode was never attempted.
-    def test_v3_rejects_it_at_the_url_guard_rather_than_in_the_decoder(self):
-        result = decoderv3(OVERSIZED_URL)
+    # Asserting only that status is False cannot tell "rejected by the length check" from
+    # "blew up inside b64decode and got swallowed". Assert on which one it was: rejected at
+    # the URL guard means the decode was never attempted.
+    def test_decode_rejects_it_at_the_url_guard_rather_than_in_the_decoder(self):
+        result = decode(OVERSIZED_URL)
         assert result["status"] is False
-        assert result["error"] == "Invalid Google News URL"
-        assert "base64" not in result["error"]
+        assert result["message"] == "Invalid Google News URL format."
+        assert "base64" not in result["message"]
 
-    def test_v4_rejects_it_at_the_url_guard_rather_than_in_the_decoder(self):
-        result = decoderv4([OVERSIZED_URL])[0]
+    def test_decode_batch_rejects_it_at_the_url_guard_too(self):
+        result = decode_batch([OVERSIZED_URL])[0]
         assert result["status"] is False
-        assert result["error"] == "Invalid Google News URL"
-        assert "base64" not in result["error"]
+        assert result["message"] == "Invalid Google News URL format."
+        assert "base64" not in result["message"]
 
-    def test_a_real_token_still_decodes(self):
-        # From the worked example in decoderv1.py. Guards against the bound being set so
-        # low, or the guard so tight, that legitimate URLs stop resolving.
+    def test_a_real_token_still_decodes(self, recording):
+        # A real /articles/ token that packs its destination inline. Guards against the bound
+        # being set so low, or the guard so tight, that legitimate URLs stop resolving -- and
+        # confirms such a token still costs no request at all.
         url = (
             "https://news.google.com/rss/articles/CBMiLmh0dHBzOi8vd3d3LmJiYy5jb20vbmV3cy9h"
             "cnRpY2xlcy9jampqbnhkdjE4OG_SATJodHRwczovL3d3dy5iYmMuY29tL25ld3MvYXJ0aWNsZXMv"
             "Y2pqam54ZHYxODhvLmFtcA?oc=5"
         )
-        assert decoderv1(url) == "https://www.bbc.com/news/articles/cjjjnxdv188o"
+        result = decode(url, transport=recording)
+        assert result["decoded_url"] == "https://www.bbc.com/news/articles/cjjjnxdv188o"
+        assert recording.calls == []
 
 
     def test_the_documented_entry_point_bounds_it_too(self):
-        # gnewsdecoder -> GoogleDecoder -> new_decoderv2 is the only path the README
-        # documents. An earlier draft bounded only decoderv1-v4, which it never mentions.
+        # gnewsdecoder -> GoogleDecoder is the path the README documents, so the bound has to
+        # hold here and not only on the lower-level entry points.
         assert GoogleDecoder().get_base64_str(OVERSIZED_URL)["status"] is False
 
     def test_a_token_of_exactly_the_limit_is_still_accepted(self):
@@ -157,7 +156,7 @@ class TestIntervalIsBounded:
 
     def test_sleep_never_receives_more_than_the_cap(self, monkeypatch):
         slept = []
-        monkeypatch.setattr("googlenewsdecoder.new_decoderv2.time.sleep", slept.append)
+        monkeypatch.setattr("googlenewsdecoder.decoder.time.sleep", slept.append)
         GoogleDecoder(transport=working_transport()).decode_google_news_url(GOOGLE_URL, interval=10**9)
         assert slept == [MAX_INTERVAL]
 

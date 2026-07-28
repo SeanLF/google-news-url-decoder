@@ -5,7 +5,6 @@ callers keep working; new code can use `googlenewsdecoder.decode()` directly.
 """
 
 import time
-from typing import Optional
 
 from . import protocol
 from .flow import decode_flow, drive
@@ -14,15 +13,15 @@ from .transports import RequestsTransport
 
 
 class GoogleDecoder:
-    def __init__(self, proxy: Optional[str] = None, transport=None):
+    def __init__(self, proxy: str | None = None, transport=None):
         """
         Parameters:
             proxy (str, optional): Proxy for all requests. http(s):// or socks5://.
             transport (callable, optional): How requests are sent -- any callable taking
                 (Request, timeout=, proxy=) and returning the response text. Defaults to
-                the standard-library transport, so the package needs no dependencies. Pass
-                RequestsTransport() (pip install googlenewsdecoder[requests]) for connection
-                pooling or a SOCKS proxy. See `transports`.
+                RequestsTransport, which is what this package has always used. Pass
+                UrllibTransport() to drop the `requests` dependency, or your own callable
+                for pooling, retries or tracing. See `transports`.
         """
         self.proxy = proxy
         self.transport = transport or RequestsTransport()
@@ -34,7 +33,7 @@ class GoogleDecoder:
             return {"status": False, "message": "Invalid Google News URL format."}
         return {"status": True, "base64_str": token}
 
-    def decode_google_news_url(self, source_url: str, interval: Optional[int] = None) -> dict:
+    def decode_google_news_url(self, source_url: str, interval: int | None = None) -> dict:
         """Decode a Google News article URL into its original source URL."""
         try:
             result = drive(

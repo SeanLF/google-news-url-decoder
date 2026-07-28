@@ -15,5 +15,3 @@ build/
 
 test.py
 .pytest_cache/
-gurls*.txt
-today.html

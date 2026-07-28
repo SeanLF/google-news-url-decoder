@@ -15,14 +15,37 @@ differs between sync and async lives there; nothing about the decode does.
 This is the sans-I/O shape (sans-io.readthedocs.io), the same one `h11` uses.
 """
 
-from typing import Optional
 
 from . import protocol
 from .limits import MAX_TOKEN_LENGTH
 from .transports import TransportError
 
 
-def decode_flow(source_url: str, max_token_length: Optional[int] = MAX_TOKEN_LENGTH):
+def _fetch_params(token: str):
+    """Yield article-page GETs until one parses; return (params, last_error).
+
+    `yield from` passes `send()` and `throw()` straight through, so both flows drive this the
+    same way and neither carries its own copy. They did, and the copies had already drifted:
+    only one of them fell back to a default message, and only one carried the note below.
+    """
+    last_error = None
+    for url in protocol.params_urls(token):
+        try:
+            body = yield protocol.params_request(url)
+        except TransportError as e:
+            last_error = f"Request error in get_decoding_params: {e}"
+            continue
+        params = protocol.parse_params(body)
+        if params:
+            return params, None
+        # A page that parses to nothing is the common failure. The old code returned here
+        # instead of trying the next candidate, so the documented RSS fallback only ever ran
+        # on a transport exception -- never on the path that needed it.
+        last_error = "Failed to fetch data attributes from Google News with the articles URL."
+    return None, last_error or "Failed to fetch data attributes from Google News."
+
+
+def decode_flow(source_url: str, max_token_length: int | None = MAX_TOKEN_LENGTH):
     """Yield the requests needed to decode `source_url`; return the result dict.
 
     Send each yielded `Request` and pass the response body back in. Throw a
@@ -33,24 +56,19 @@ def decode_flow(source_url: str, max_token_length: Optional[int] = MAX_TOKEN_LEN
     if token is None:
         return {"status": False, "message": "Invalid Google News URL format."}
 
-    last_error = None
-    params = None
-    for url in protocol.params_urls(token):
-        try:
-            body = yield protocol.params_request(url)
-        except TransportError as e:
-            last_error = f"Request error in get_decoding_params: {e}"
-            continue
-        params = protocol.parse_params(body)
-        if params:
-            break
-        # A page that parses to nothing is the common failure. The old code returned
-        # here instead of trying the next candidate, so the documented RSS fallback
-        # only ever ran on a transport exception -- never on the path that needed it.
-        last_error = "Failed to fetch data attributes from Google News with the articles URL."
+    # Some tokens carry the publisher URL outright, and reading one costs nothing.
+    #
+    # Do not expect this to fire often. The form is real -- it is the example in this
+    # project's own README -- but sampling current feeds finds essentially only opaque
+    # handles, so treat this as a free early exit rather than a way to cut request volume.
+    # Anyone sizing a request budget should assume every URL costs the full round trip.
+    embedded = protocol.embedded_url(token)
+    if embedded is not None:
+        return {"status": True, "decoded_url": embedded}
 
+    params, last_error = yield from _fetch_params(token)
     if not params:
-        return {"status": False, "message": last_error or "Failed to fetch data attributes from Google News."}
+        return {"status": False, "message": last_error}
 
     try:
         body = yield protocol.decode_request(token, *params)
@@ -108,7 +126,7 @@ async def drive_async(flow, transport, **kwargs) -> dict:
             return stop.value
 
 
-def decode_batch_flow(source_urls, max_token_length: Optional[int] = MAX_TOKEN_LENGTH, chunk_size: int = 50):
+def decode_batch_flow(source_urls, max_token_length: int | None = MAX_TOKEN_LENGTH, chunk_size: int = 50):
     """Decode many URLs, one signature fetch each plus one POST per chunk.
 
     Yields requests the same way `decode_flow` does; returns a list of result dicts
@@ -130,18 +148,12 @@ def decode_batch_flow(source_urls, max_token_length: Optional[int] = MAX_TOKEN_L
         if token is None:
             results[position] = {"status": False, "message": "Invalid Google News URL format."}
             continue
-        params = None
-        last_error = None
-        for url in protocol.params_urls(token):
-            try:
-                body = yield protocol.params_request(url)
-            except TransportError as e:
-                last_error = f"Request error in get_decoding_params: {e}"
-                continue
-            params = protocol.parse_params(body)
-            if params:
-                break
-            last_error = "Failed to fetch data attributes from Google News with the articles URL."
+        # See decode_flow, including the note that this almost never fires on real tokens.
+        embedded = protocol.embedded_url(token)
+        if embedded is not None:
+            results[position] = {"status": True, "decoded_url": embedded}
+            continue
+        params, last_error = yield from _fetch_params(token)
         if not params:
             results[position] = {"status": False, "message": last_error}
             continue

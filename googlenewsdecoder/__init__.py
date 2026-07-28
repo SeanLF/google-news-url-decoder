@@ -24,31 +24,20 @@ throttles per IP, so a limiter must be *shared* across decoders rather than held
 instance, and heavy concurrency against this endpoint is self-defeating.
 """
 
-from typing import Optional
-
 from .__version__ import __version__
-from .flow import decode_batch_flow, decode_flow, drive, drive_async
-from .new_decoderv2 import GoogleDecoder
+from .decoder import GoogleDecoder
 
-try:  # the pre-1.0 decoders still import `requests` directly at module scope
-    from .decoderv1 import decode_google_news_url as decoderv1
-    from .decoderv2 import decode_google_news_url as decoderv2
-    from .decoderv3 import decode_google_news_url as decoderv3
-    from .decoderv4 import decode_google_news_url as decoderv4
-    from .new_decoderv1 import decode_google_news_url as new_decoderv1
-except ImportError:  # pragma: no cover - only when the `requests` extra is absent
-    decoderv1 = decoderv2 = decoderv3 = decoderv4 = new_decoderv1 = None
-from .protocol import Request
+# Imported unguarded: nothing on this path touches httpx until a transport is constructed,
+# so the async API is importable everywhere and only *using* it without the extra fails --
+# with a message from HttpxAsyncTransport naming the extra.
+from .decoder_async import GoogleDecoderAsync
+from .flow import decode_batch_flow, decode_flow, drive, drive_async
 from .limits import DEFAULT_TIMEOUT
+from .protocol import Request
 from .transports import RequestsTransport, Transport, TransportError, UrllibTransport
 
-try:  # async support is optional: pip install googlenewsdecoder[async]
-    from .new_decoderv3 import GoogleDecoderAsync
-except ImportError:  # pragma: no cover - depends on httpx being installed
-    GoogleDecoderAsync = None
 
-
-def decode(source_url: str, *, transport=None, proxy: Optional[str] = None, interval: Optional[int] = None) -> dict:
+def decode(source_url: str, *, transport=None, proxy: str | None = None, interval: int | None = None) -> dict:
     """Decode one Google News URL.
 
     Parameters:
@@ -64,11 +53,9 @@ def decode(source_url: str, *, transport=None, proxy: Optional[str] = None, inte
 
 
 async def decode_async(
-    source_url: str, *, transport=None, proxy: Optional[str] = None, interval: Optional[int] = None
+    source_url: str, *, transport=None, proxy: str | None = None, interval: int | None = None
 ) -> dict:
     """Decode one Google News URL asynchronously. Needs httpx unless you pass a transport."""
-    if GoogleDecoderAsync is None:
-        raise ImportError("async decoding requires httpx: pip install googlenewsdecoder[async]")
     decoder = GoogleDecoderAsync(proxy=proxy, transport=transport)
     try:
         return await decoder.decode_google_news_url(source_url, interval=interval)
@@ -76,7 +63,7 @@ async def decode_async(
         await decoder.close()
 
 
-def decode_batch(source_urls, *, transport=None, proxy: Optional[str] = None, chunk_size: int = 50) -> list:
+def decode_batch(source_urls, *, transport=None, proxy: str | None = None, chunk_size: int = 50) -> list:
     """Decode many Google News URLs, sharing one POST per chunk.
 
     Costs one signature fetch per URL plus one POST per `chunk_size` URLs, rather than two
@@ -95,18 +82,50 @@ def decode_batch(source_urls, *, transport=None, proxy: Optional[str] = None, ch
             proxy=proxy,
         )
     except Exception as e:
-        # decode() turns a stray exception into a status dict; decode_batch let it escape and
-        # discard every already-decoded result with it. Report per URL instead.
+        # decode() turns a stray exception into a status dict; decode_batch let one escape to
+        # the caller. It is reported per URL instead so the return type is honest.
+        #
+        # This does NOT preserve partial work: `drive` only returns on StopIteration, so an
+        # unexpected exception mid-flow still loses every result computed before it and
+        # replaces all of them with this same message.
         return [{"status": False, "message": f"Error in decode_batch: {e}"} for _ in source_urls]
 
 
+# The five numbered decoders are gone. They were five standalone implementations of one
+# decode, four of them carrying their own copy of the batchexecute envelope -- which is why a
+# change at Google's end meant a new decoder version rather than an edit. Removing them rather
+# than aliasing them is deliberate: their contracts disagreed with each other (bare string vs
+# status dict, `url` vs `decoded_url`, raising vs not), so a silent alias would hand callers a
+# shape they did not ask for. This names the replacement instead of failing with `AttributeError:
+# decoderv3`, which tells nobody anything.
+_REMOVED = {
+    "decoderv1": (
+        "protocol.embedded_url(protocol.article_id(url)) -- still pure and offline, but it "
+        "returns None where decoderv1 handed back the original URL unchanged"
+    ),
+    "decoderv2": "decode(url); it returns {'status', 'decoded_url'} rather than a bare string",
+    "decoderv3": "decode(url); the failure key is 'message', not 'error'",
+    "decoderv4": "decode_batch(urls); results stay aligned to the input order",
+    "new_decoderv1": "decode(url) -- same call, same return shape, current name",
+}
+
+
+def __getattr__(name: str):
+    if name in _REMOVED:
+        raise AttributeError(
+            f"googlenewsdecoder.{name} was removed in 0.2. Use {_REMOVED[name]}. "
+            "See the Migrating section of the README."
+        )
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 # Pre-1.0 names, kept working. `decode` and `decode_async` are the ones to reach for.
-def gnewsdecoder(source_url: str, interval: Optional[int] = None, proxy: Optional[str] = None) -> dict:
+def gnewsdecoder(source_url: str, interval: int | None = None, proxy: str | None = None) -> dict:
     """Deprecated alias for `decode`."""
     return decode(source_url, proxy=proxy, interval=interval)
 
 
-async def gnews_decoder_async(source_url: str, interval: Optional[int] = None, proxy: Optional[str] = None) -> dict:
+async def gnews_decoder_async(source_url: str, interval: int | None = None, proxy: str | None = None) -> dict:
     """Deprecated alias for `decode_async`."""
     return await decode_async(source_url, proxy=proxy, interval=interval)
 
@@ -132,10 +151,5 @@ __all__ = [
     # pre-1.0 names
     "gnewsdecoder",
     "gnews_decoder_async",
-    "decoderv1",
-    "decoderv2",
-    "decoderv3",
-    "decoderv4",
-    "new_decoderv1",
     "__version__",
 ]

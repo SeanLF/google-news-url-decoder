@@ -5,7 +5,6 @@ moved into `flow`, this class and `GoogleDecoder` were 88% the same code.
 """
 
 import asyncio
-from typing import Optional
 
 from . import protocol
 from .flow import decode_flow, drive_async
@@ -14,7 +13,7 @@ from .transports import HttpxAsyncTransport
 
 
 class GoogleDecoderAsync:
-    def __init__(self, proxy: Optional[str] = None, transport=None):
+    def __init__(self, proxy: str | None = None, transport=None):
         """
         Parameters:
             proxy (str, optional): Proxy for all requests.
@@ -38,7 +37,7 @@ class GoogleDecoderAsync:
             return {"status": False, "message": "Invalid Google News URL format."}
         return {"status": True, "base64_str": token}
 
-    async def decode_google_news_url(self, source_url: str, interval: Optional[int] = None) -> dict:
+    async def decode_google_news_url(self, source_url: str, interval: int | None = None) -> dict:
         """Decode a Google News article URL into its original source URL."""
         try:
             result = await drive_async(

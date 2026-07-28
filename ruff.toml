@@ -1,0 +1,30 @@
+# Kept as ruff.toml rather than pyproject.toml on purpose: this project builds from setup.py,
+# and adding a pyproject.toml switches pip to a PEP 517 build. That is a packaging change
+# wearing a linter's clothes, and it does not belong in the same commit as lint config.
+
+# Must track python_requires in setup.py. While that was ">=3.9" the UP rules proposed
+# `X | None` annotations throughout, which are a syntax error on 3.9 at import time -- the
+# linter argues convincingly for breaking the floor unless you tell it where the floor is.
+target-version = "py310"
+
+line-length = 120
+
+[lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "W",   # warnings
+    "I",   # import sorting
+    "UP",  # pyupgrade, bounded by target-version above
+    "B",   # bugbear
+    "SIM", # simplify
+]
+
+[lint.per-file-ignores]
+# Tests and probes reach the package through a path insert before importing it, which is
+# exactly the "module level import not at top of file" that E402 exists to catch.
+"tests/*" = ["E402"]
+# Probes are single-purpose scripts run by hand, not library code. They are still linted for
+# real defects; B904 (exception chaining) only shapes a traceback nobody reads, since these
+# print one JSON line and exit.
+"probes/*" = ["E402", "B904"]

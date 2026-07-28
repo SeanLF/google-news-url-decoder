@@ -1,13 +1,13 @@
-from setuptools import setup, find_packages
-import os
+from pathlib import Path
+
+from setuptools import find_packages, setup
+
+HERE = Path(__file__).parent
+
 
 def get_version():
-    version_file = os.path.join(
-        os.path.dirname(__file__), "googlenewsdecoder", "__version__.py"
-    )
-    with open(version_file, "r") as f:
-        version_vars = {}
-        exec(f.read(), version_vars)
+    version_vars = {}
+    exec((HERE / "googlenewsdecoder" / "__version__.py").read_text(encoding="utf-8"), version_vars)
     return version_vars["__version__"]
 
 
@@ -15,13 +15,17 @@ setup(
     name="googlenewsdecoder",
     version=get_version(),
     description="A Python package to decode Google News URLs to their original sources.",
-    long_description=open("README.md").read(),
+    # Relative to this file, not the working directory: `pip install /path/to/checkout` from
+    # anywhere else was reading README.md out of the caller's cwd, or failing to find it.
+    long_description=(HERE / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     url="https://github.com/SSujitX/google-news-url-decoder",
     author="Sujit Biswas",
     author_email="ssujitxx@gmail.com",
     license="MIT",
-    packages=find_packages(),
+    # Explicit, so that adding a top-level directory with an __init__.py in it never quietly
+    # becomes part of what users install. `probes/` in particular is a live-network lab.
+    packages=find_packages(include=["googlenewsdecoder", "googlenewsdecoder.*"]),
     # Two dependencies, each earning its place against a defect found by adversarial review:
     #   requests   -- transparent + bounded decompression, normalised content-encoding errors,
     #                 proxy semantics (an explicit proxy beats NO_PROXY), SOCKS via the extra
@@ -45,5 +49,8 @@ setup(
         "Documentation": "https://github.com/SSujitX/google-news-url-decoder#readme",
         "Source Code": "https://github.com/SSujitX/google-news-url-decoder",
     },
-    python_requires=">=3.9",
+    # Raised from 3.9, which reached end of security support on 2025-10-31. Supporting a dead
+    # version is not free: it forbids `X | None` annotations everywhere and forces the linter
+    # to be configured around a floor nobody can still receive security fixes on.
+    python_requires=">=3.10",
 )

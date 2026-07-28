@@ -7,11 +7,7 @@ A fix without a test is a fix that comes back.
 import gzip
 import io
 import json
-import sys
 import zlib
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
@@ -70,7 +66,11 @@ class TestBatchTagsCannotBeConfused:
         got = protocol.parse_batch_decoded(frames([(1, "https://pub/one"), (1, "https://pub/one")]))
         assert got == {1: "https://pub/one"}
 
-    @pytest.mark.parametrize("tag", [" 1 ", "+1", "1_0", "١", "1.9"], ids=["spaces", "plus", "underscore", "arabic-indic", "float"])
+    @pytest.mark.parametrize(
+        "tag",
+        [" 1 ", "+1", "1_0", "١", "1.9"],
+        ids=["spaces", "plus", "underscore", "arabic-indic", "float"],
+    )
     def test_non_canonical_tags_are_rejected(self, tag):
         body = ")]}'\n\n" + json.dumps(
             [["wrb.fr", "Fbv4je", json.dumps(["garturlres", "https://pub/x"]), None, None, None, tag]]

@@ -102,6 +102,29 @@ decode(url, proxy="socks5://user:pass@host:port")   # needs the [socks] extra
 SOCKS goes through `requests` and PySocks. `UrllibTransport` refuses a SOCKS proxy outright
 rather than quietly sending traffic direct, because urllib has no SOCKS support.
 
+## Migrating from 0.1.x
+
+`gnewsdecoder` still works and still returns what it always did, so most code needs no change.
+
+The five numbered decoders are gone. They were five standalone implementations of one decode,
+four carrying their own copy of the request envelope — which is why a change at Google's end
+meant a new decoder version rather than an edit. They are not aliased, because their contracts
+disagreed with each other and a silent alias would hand you a shape you did not ask for.
+Reaching for one now raises an error naming its replacement.
+
+| removed | use | difference to expect |
+|---|---|---|
+| `decoderv1(url)` | `protocol.embedded_url(protocol.article_id(url))` | still pure and offline, but returns `None` where `decoderv1` handed back the original URL unchanged |
+| `decoderv2(url)` | `decode(url)` | returns a dict, not a bare string; does not raise |
+| `decoderv3(url)` | `decode(url)` | the failure key is `message`, not `error` |
+| `decoderv4(urls)` | `decode_batch(urls)` | results stay aligned to input order |
+| `new_decoderv1(url)` | `decode(url)` | same call, same return shape, current name |
+
+`get_decoding_params()` and `decode_url()` are no longer public methods on the decoder classes;
+the same steps live in `protocol` as pure functions.
+
+The minimum Python is now 3.10, since 3.9 left security support in October 2025.
+
 ## Layers
 
 Enter wherever suits you:
@@ -115,10 +138,14 @@ Enter wherever suits you:
 ## Contributing
 
 Tests run without a network — every HTTP entry point is substituted, so nothing depends on
-Google being reachable or on the decode contract of the day.
+Google being reachable or on the decode contract of the day. That is enforced rather than
+promised: `tests/conftest.py` takes the sockets away, so a test that reaches out fails naming
+itself.
 
 ```sh
+pip install -r requirements.txt   # the package, plus pytest and ruff
 python -m pytest tests/ -q
+ruff check .
 ```
 
 MIT licensed.

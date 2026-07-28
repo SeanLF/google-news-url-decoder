@@ -1,8 +1,16 @@
-﻿certifi==2024.12.14
-charset-normalizer==3.4.1
-idna==3.10
-PySocks==1.7.1
-requests==2.32.3
-selectolax==0.3.27
-urllib3==2.3.0
-httpx==0.28.1
+# Development and test dependencies. NOT the install dependencies.
+#
+# What a user needs is declared in setup.py, which is the single source of truth:
+#
+#     pip install googlenewsdecoder            requests + selectolax
+#     pip install googlenewsdecoder[async]     adds httpx
+#     pip install googlenewsdecoder[socks]     adds PySocks
+#
+# This file used to pin requests' own transitive dependencies (certifi, charset-normalizer,
+# idna, urllib3) alongside httpx and PySocks as though all six were required. Nothing reads
+# it -- not setup.py, not CI -- so it drifted into stating the opposite of what the package
+# actually installs. Kept, but only for the job it can do honestly.
+
+-e .[all]
+pytest>=8.0
+ruff>=0.16
