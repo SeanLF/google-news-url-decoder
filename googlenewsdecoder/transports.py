@@ -68,7 +68,9 @@ TransportError into `{"status": False, "message": ...}`, the only thing left to 
 `RateLimited` is not a TransportError, so it propagates out of `drive` to your loop untouched.
 """
 
+import contextlib
 import threading
+import zlib
 from typing import Protocol, runtime_checkable
 
 # Re-exported, not defined here: `TransportError` moved to `errors` so that `flow` can name it
@@ -128,6 +130,89 @@ _DECODERS = frozenset({"gzip", "deflate", "br", "zstd", "identity"})
 
 # Headers scoped to the origin that issued them; dropped on a cross-origin redirect.
 _PER_ORIGIN = frozenset({"authorization", "cookie", "proxy-authorization"})
+
+# What the async chain follows. Matches urllib3's REDIRECT_STATUSES, so the two transports
+# resolve the same chain.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+class _IdentityStream:
+    """No encoding: the ceiling is a slice, and there is no such thing as a truncated one."""
+
+    eof = True
+
+    def __call__(self, raw, budget):
+        return raw[:budget]
+
+
+class _ZlibStream:
+    """Incremental zlib decode with an output ceiling, plus the three things zlib will not do.
+
+    Multi-member gzip is legal, and a single decompressobj stops at the end of the first member,
+    parks the remainder in `unused_data` and returns b"" from then on -- so a concatenated
+    stream decodes to its first member and nothing says so. A fresh object per member is what
+    urllib3's GzipDecoder does, and what this does.
+
+    Raw deflate arrives without the zlib wrapper from some servers. urllib3 retries with a
+    negative window size, so a body the sync transport reads must not fail here.
+
+    `eof` is how the caller can tell a complete stream from one that stopped mid-member. zlib
+    reports a truncated gzip by simply producing less, so without checking it a cut stream is a
+    short article, and an empty one is an empty article.
+    """
+
+    def __init__(self, wbits):
+        self._wbits = wbits
+        self._obj = zlib.decompressobj(wbits)
+        self._started = False
+
+    @property
+    def eof(self):
+        return self._obj.eof
+
+    def __call__(self, raw, budget):
+        first = self._member(raw, budget)
+        # `unused_data` is non-empty only past the end of a member, so one member covering the
+        # chunk is the ordinary case -- returned as-is, because copying it through a buffer
+        # doubles the peak of a body already sized to the cap.
+        if len(first) >= budget or not self._obj.unused_data:
+            return first
+        out = bytearray(first)
+        while self._obj.unused_data and len(out) < budget:
+            out += self._member(self._obj.unused_data, budget - len(out), fresh=True)
+        return bytes(out)
+
+    def _member(self, data, budget, fresh=False):
+        if fresh:
+            self._obj = zlib.decompressobj(self._wbits)
+        try:
+            return self._obj.decompress(data, max(budget, 0))
+        except zlib.error:
+            if self._started or self._wbits != zlib.MAX_WBITS:
+                raise
+            self._wbits = -zlib.MAX_WBITS  # raw deflate, no zlib header
+            self._obj = zlib.decompressobj(self._wbits)
+            return self._obj.decompress(data, max(budget, 0))
+        finally:
+            self._started = True
+
+
+def _bounded_decoder(encoding: str):
+    """Return a callable `(raw, budget) -> bytes` yielding at most `budget` bytes per call.
+
+    urllib3 gives the sync transport this for free. The async one has to build it, and can only
+    offer it for what zlib covers: brotli and zstd expose no output ceiling in their Python
+    bindings, so a bomb in either could only be measured by decompressing it. This transport
+    advertises `gzip, deflate`, so anything else is a server ignoring what it was asked for --
+    and `x-gzip` is refused rather than decoded, because the sync side refuses it too.
+    """
+    if encoding in ("", "identity"):
+        return _IdentityStream()
+    if encoding == "gzip":
+        return _ZlibStream(16 + zlib.MAX_WBITS)
+    if encoding == "deflate":
+        return _ZlibStream(zlib.MAX_WBITS)
+    raise TransportError(f"unsupported Content-Encoding: {encoding}")
 
 
 class Urllib3Transport(_HeaderMixin):
@@ -257,6 +342,10 @@ class HttpxAsyncTransport(_HeaderMixin):
 
     An httpx client is safe for concurrent use within one event loop, so one transport can
     serve many in-flight decodes.
+
+    Reads and decompresses the body itself, because httpx offers no bounded decode and the
+    sync side's `MAX_RESPONSE_BYTES` has to hold here too. That limits it to what zlib covers:
+    `gzip` and `deflate`, which are what it advertises, and identity. See `_read_bounded`.
     """
 
     def __init__(self, client=None, proxy: str | None = None, headers: dict | None = None):
@@ -297,12 +386,98 @@ class HttpxAsyncTransport(_HeaderMixin):
 
         try:
             response = await self._follow(request, timeout)
-            response.raise_for_status()
-            return response.text
         except httpx.HTTPStatusError as e:
+            # Only reachable through a caller's client: httpx's documented raise_for_status
+            # response hook. It is not a RequestError, so without this it left the transport
+            # untyped, escaped `drive_async`, and abandoned a whole batch.
             raise TransportError(str(e), status=e.response.status_code) from e
         except httpx.RequestError as e:
             raise TransportError(str(e)) from e
+
+        try:
+            # >= 300, not >= 400: a 3xx this loop declined to follow -- no Location -- would
+            # otherwise be handed back as the article body. The sync side already refused that;
+            # `raise_for_status()` here did not, because it only fires from 400.
+            if response.status_code >= 300:
+                raise TransportError(f"HTTP {response.status_code}", status=response.status_code)
+            body = await self._read_bounded(response)
+        except httpx.RequestError as e:
+            await self._give_up(response)
+            raise TransportError(str(e)) from e
+        except BaseException:
+            # Not `finally`: refusing a body means hanging up mid-read, which is exactly when a
+            # peer reset makes the close fail, and a bare finally would let that replace the
+            # diagnosis. `_give_up` swallows its own errors for the same reason.
+            await self._give_up(response)
+            raise
+        await self._give_up(response)
+        return body.decode("utf-8", "replace")
+
+    @staticmethod
+    async def _give_up(response) -> None:
+        """Finish with a response, keeping the pooled connection when that is cheap.
+
+        Closing a streamed response whose body was never read makes httpcore discard the
+        connection: measured one per hop, 5 connections for a 4-hop chain, where the sync
+        transport used 1. The throttle counts connections, so that is budget.
+
+        Draining reads RAW bytes and never decodes, so a compressed hop cannot expand past its
+        declared length -- `aread()` here would decode, turning a 1 MiB gzipped 302 into a
+        gigabyte. Never raises: it runs with another exception possibly in flight.
+        """
+        try:
+            declared = int(response.headers.get("Content-Length", "-1"))
+        except ValueError:
+            declared = -1
+        with contextlib.suppress(Exception):
+            if not response.is_stream_consumed and 0 <= declared <= MAX_DRAIN_BYTES:
+                async for _ in response.aiter_raw():
+                    pass
+        with contextlib.suppress(Exception):
+            await response.aclose()
+
+    async def _read_bounded(self, response) -> bytes:
+        """Accumulate the body, refusing it the moment it decodes past `MAX_RESPONSE_BYTES`.
+
+        Reads `aiter_raw` and decompresses here rather than taking httpx's decoded stream,
+        because neither of httpx's two options has a ceiling: `.text` reads to the end and asks
+        afterwards, and `aiter_bytes` decodes a whole network chunk per step, so a 64 KiB read
+        of a gzip bomb is ~64 MB in one allocation. Counting chunks measured 157 MiB peak
+        against a 32 MiB cap. zlib takes the ceiling as an argument; httpx does not expose it.
+        """
+        if response.is_stream_consumed:
+            # The body is already in memory and already decoded, so the cap can only be applied
+            # after the fact. Two ways to get here: a Response built with its content in hand
+            # (httpx.MockTransport, a caller's stub), or a caller's client whose response hook
+            # read the body -- httpx's own idiom for a hook that needs content. The second is a
+            # real socket, so this is a hole in the bound rather than a case where none is
+            # needed: measured 256 MiB peak against a 32 MiB cap through such a hook.
+            body = response.content
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise TransportError(f"response exceeded {MAX_RESPONSE_BYTES} bytes decompressed")
+            return body
+
+        encoding = (response.headers.get("content-encoding") or "").lower()
+        decode = _bounded_decoder(encoding)
+        chunks, total = [], 0
+        try:
+            async for raw in response.aiter_raw():
+                # cap + 1 rather than cap, so "exactly the cap" stays acceptable and one byte
+                # more is detectable -- the same trick as the sync read().
+                piece = decode(raw, MAX_RESPONSE_BYTES + 1 - total)
+                total += len(piece)
+                if total > MAX_RESPONSE_BYTES:
+                    raise TransportError(f"response exceeded {MAX_RESPONSE_BYTES} bytes decompressed")
+                chunks.append(piece)
+        except zlib.error as e:
+            # The sync side gets this normalised by urllib3; here it would otherwise reach a
+            # caller who was told to catch TransportError.
+            raise TransportError(f"could not decode {encoding} body: {e}") from e
+        if not decode.eof:
+            # zlib reports a stream cut mid-member by producing less, so silence here is how a
+            # truncated article becomes a short one and an empty body becomes an empty article.
+            raise TransportError(f"truncated {encoding} body")
+        return b"".join(chunks)
 
     async def _follow(self, request: Request, timeout: float | None):
         """Resolve the redirect chain carrying neither cookies nor cross-origin credentials.
@@ -317,23 +492,30 @@ class HttpxAsyncTransport(_HeaderMixin):
         origin = urlsplit(url)[:2]
         for _ in range(MAX_REDIRECTS):
             self._client.cookies.clear()
-            response = await self._client.request(
+            outgoing = self._client.build_request(
                 method,
                 url,
                 headers=headers,
                 content=body,
-                # Per request, not just on the client we build: a caller-supplied client with
-                # follow_redirects=True would resolve the chain internally and replay the cookie.
-                follow_redirects=False,
                 # timeout was accepted and silently dropped, so a caller supplying their own
                 # client got no timeout at all. Passing it through fixes that.
                 **({"timeout": timeout} if timeout is not None else {}),
             )
-            if response.status_code not in (301, 302, 303, 307, 308):
+            # stream=True so nothing is read until `_read_bounded` can refuse it. The caller
+            # closes the response it gets back; every hop this loop discards, it closes itself.
+            response = await self._client.send(
+                outgoing,
+                stream=True,
+                # Per request, not just on the client we build: a caller-supplied client with
+                # follow_redirects=True would resolve the chain internally and replay the cookie.
+                follow_redirects=False,
+            )
+            if response.status_code not in _REDIRECT_STATUSES:
                 return response
             location = response.headers.get("Location")
             if not location:
                 return response
+            await self._give_up(response)
             url = urljoin(url, location)
             if urlsplit(url)[:2] != origin:
                 # What urllib3 and browsers do: a credential scoped to one origin must not

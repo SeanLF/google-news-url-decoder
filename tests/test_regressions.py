@@ -4,6 +4,7 @@ Each of these was fixed and then verified by hand, which is not the same as bein
 A fix without a test is a fix that comes back.
 """
 
+import asyncio
 import contextlib
 import functools
 import gzip
@@ -11,6 +12,7 @@ import io
 import json
 import threading
 import tracemalloc
+import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
@@ -145,6 +147,75 @@ def peak_bytes(fn):
             tracemalloc.stop()
 
 
+def gzipped(data):
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb") as f:
+        f.write(data)
+    return buf.getvalue()
+
+
+def raw_deflate(data):
+    """deflate with no zlib wrapper, which is what some servers mean by `Content-Encoding`."""
+    obj = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    return obj.compress(data) + obj.flush()
+
+
+def redirect_chain(hops, body=b"FINAL"):
+    """/0 -> /1 -> ... -> /<hops>, all on one host, so one connection can serve every hop."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            n = int(self.path.lstrip("/"))
+            if n < hops:
+                self.send_response(302)
+                self.send_header("Location", f"/{n + 1}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    return Handler
+
+
+def fetch(kind, url, timeout=10):
+    """One request through whichever shipped transport `kind` names, returning its text."""
+    from googlenewsdecoder.transports import HttpxAsyncTransport, Urllib3Transport
+
+    if kind == "sync":
+        return Urllib3Transport()(Request("GET", url, {}), timeout=timeout)
+
+    async def go():
+        transport = HttpxAsyncTransport()
+        try:
+            return await transport(Request("GET", url, {}), timeout=timeout)
+        finally:
+            await transport.aclose()
+
+    return asyncio.run(go())
+
+
+# Bodies both transports must read identically. The async one decodes for itself, so each of
+# these is something urllib3 was doing for the sync side that had to be reimplemented.
+DECODABLE = [
+    (gzipped(b"HELLO"), "gzip", "HELLO"),
+    (gzipped(b"AAAA") + gzipped(b"BBBB"), "gzip", "AAAABBBB"),
+    (zlib.compress(b"HELLO"), "deflate", "HELLO"),
+    (raw_deflate(b"HELLO"), "deflate", "HELLO"),
+    (b"HELLO", None, "HELLO"),
+]
+DECODABLE_IDS = ["gzip", "multi-member-gzip", "zlib-deflate", "raw-deflate", "identity"]
+
+# A gzip stream cut mid-member. The HTTP body is complete and Content-Length honest, so only
+# the decoder can notice.
+CUT_GZIP = gzipped(b"X" * 200_000)[:-50]
+
+
 def frames(pairs):
     body = [["wrb.fr", "Fbv4je", json.dumps(["garturlres", u]), None, None, None, str(t)] for t, u in pairs]
     return ")]}'\n\n" + json.dumps(body + [["di", 1]])
@@ -252,6 +323,37 @@ class TestDecompressionIsBounded:
             "read(amt, decode_content=True) is not bounding DECODED output"
         )
 
+    def test_the_async_transport_refuses_a_bomb_without_allocating_it(self):
+        """`MAX_RESPONSE_BYTES` was enforced by one of the two shipped transports. This one
+        returned the whole 41.9 MB body, since `response.text` reads to the end before anyone
+        can object -- and switching to httpx's decoded stream only moved the problem, since it
+        decodes a whole network chunk per step (measured 157 MiB peak against a 32 MiB cap).
+        """
+        pytest.importorskip("httpx", reason="the async transport needs the [async] extra")
+
+        from googlenewsdecoder.transports import HttpxAsyncTransport
+
+        bomb = gzip_bomb(BOMB_RATIO * MAX_RESPONSE_BYTES)
+        with serving(fixed_body(bomb, encoding="gzip")) as server:
+            url = f"http://127.0.0.1:{server.server_port}/bomb"
+            transport = HttpxAsyncTransport()
+
+            async def go():
+                try:
+                    await transport(Request("GET", url, {}), timeout=30)
+                finally:
+                    await transport.aclose()
+
+            def refuse():
+                with pytest.raises(TransportError, match="exceeded"):
+                    asyncio.run(go())
+
+            peak = peak_bytes(refuse)
+        assert peak < 3 * MAX_RESPONSE_BYTES, (
+            f"peak {peak >> 20} MiB against a {MAX_RESPONSE_BYTES >> 20} MiB cap: "
+            "the async path is not bounding decoded output"
+        )
+
     def test_the_measurement_can_see_an_unbounded_read(self):
         """Calibration, not behaviour: `.data` is the unbounded read the transports avoid.
 
@@ -296,6 +398,96 @@ class TestDecompressionIsBounded:
                 Urllib3Transport()(Request("GET", url, {}), timeout=10)
 
 
+class TestTheTwoTransportsDecodeAlike:
+    """A body one transport reads and the other refuses is the worst kind of bug report: which
+    answer you get depends on whether the caller reached for `decode` or `decode_async`.
+
+    The async transport decodes for itself in order to bound the output, so everything urllib3
+    was quietly handling for the sync side became something it had to be given. Multi-member
+    gzip decoded to its first member; raw deflate raised.
+    """
+
+    @pytest.mark.parametrize("kind", ["sync", "async"])
+    @pytest.mark.parametrize(("payload", "encoding", "expected"), DECODABLE, ids=DECODABLE_IDS)
+    def test_both_transports_read_the_same_body(self, kind, payload, encoding, expected):
+        if kind == "async":
+            pytest.importorskip("httpx", reason="the async transport needs the [async] extra")
+        with serving(fixed_body(payload, encoding=encoding)) as server:
+            assert fetch(kind, f"http://127.0.0.1:{server.server_port}/x") == expected
+
+    def test_the_async_transport_refuses_a_gzip_stream_that_was_cut(self):
+        pytest.importorskip("httpx", reason="the async transport needs the [async] extra")
+        with serving(fixed_body(CUT_GZIP, encoding="gzip")) as server, pytest.raises(TransportError, match="truncated"):
+            fetch("async", f"http://127.0.0.1:{server.server_port}/cut")
+
+    def test_the_async_transport_refuses_an_empty_body_claiming_gzip(self):
+        """The same check, at zero length. The sync transport returns "" here, so this is a
+        deliberate divergence: an empty gzip stream is malformed, and an empty article is
+        indistinguishable from a decode that quietly lost everything.
+        """
+        pytest.importorskip("httpx", reason="the async transport needs the [async] extra")
+        with serving(fixed_body(b"", encoding="gzip")) as server, pytest.raises(TransportError, match="truncated"):
+            fetch("async", f"http://127.0.0.1:{server.server_port}/empty")
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="known, measured: urllib3 never checks the gzip trailer, so a stream cut "
+        "mid-member comes back as a short article -- 158672 of 200000 characters, no error. "
+        "Detecting it needs urllib3's private decoder state, which is why it is not fixed here. "
+        "Strict, so the day that changes this test says so instead of staying quietly green.",
+    )
+    def test_the_sync_transport_refuses_a_gzip_stream_that_was_cut(self):
+        with serving(fixed_body(CUT_GZIP, encoding="gzip")) as server, pytest.raises(TransportError):
+            fetch("sync", f"http://127.0.0.1:{server.server_port}/cut")
+
+
+class TestACallerSuppliedClientStaysInsideTheContract:
+    """`HttpxAsyncTransport(client=...)` accepts a client the caller configured, and both of
+    these were ways that configuration escaped the TransportError contract that `drive_async`
+    and every documented wrapper are told to catch.
+    """
+
+    def test_a_hook_that_raises_for_status_still_arrives_as_a_transport_error(self):
+        """httpx's documented raise_for_status hook throws HTTPStatusError, which is not a
+        RequestError. It escaped the transport untyped, so it escaped drive_async, so one 503
+        abandoned an entire batch instead of failing one position."""
+        httpx = pytest.importorskip("httpx", reason="the async transport needs the [async] extra")
+
+        from googlenewsdecoder.transports import HttpxAsyncTransport
+
+        async def raise_on_error(response):
+            response.raise_for_status()
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(503, text="nope")),
+            event_hooks={"response": [raise_on_error]},
+        )
+        with pytest.raises(TransportError) as excinfo:
+            asyncio.run(
+                HttpxAsyncTransport(client=client)(Request("GET", "https://news.example/x", {}), timeout=10)
+            )
+        assert excinfo.value.status == 503, "the 429/503 seam callers key off must survive"
+
+    def test_a_body_already_in_memory_is_still_capped(self):
+        """A response that arrives already read -- MockTransport, a caller's stub, or a client
+        whose response hook read the body -- cannot be bounded while it streams, because there
+        is no stream left. Measured 256 MiB peak against a 32 MiB cap through such a hook. The
+        cap is still applied, which is the most that is left to do at that point.
+        """
+        httpx = pytest.importorskip("httpx", reason="the async transport needs the [async] extra")
+
+        from googlenewsdecoder.transports import HttpxAsyncTransport
+
+        oversize = b"\0" * (MAX_RESPONSE_BYTES + 1)
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, content=oversize))
+        )
+        with pytest.raises(TransportError, match="exceeded"):
+            asyncio.run(
+                HttpxAsyncTransport(client=client)(Request("GET", "https://news.example/x", {}), timeout=10)
+            )
+
+
 class TestGivingUpOnABodyIsBounded:
     """Both halves of one trade. Abandoning a body we will not use can either drain it, keeping
     the pooled connection, or hang up. The throttle on this endpoint counts CONNECTIONS, so
@@ -324,6 +516,19 @@ class TestGivingUpOnABodyIsBounded:
             f"10 refused requests opened {accepted} connections: the error path is hanging up "
             "on a small declared body instead of draining it"
         )
+
+    @pytest.mark.parametrize("kind", ["sync", "async"])
+    def test_a_redirect_chain_does_not_cost_a_connection_per_hop(self, kind):
+        """Streaming a response and closing it unread makes httpcore drop the connection, so
+        resolving the chain by hand cost one per hop: 5 for a 4-hop chain, where urllib3 used 1.
+        The consent 302 is in the hot path, and the throttle counts connections.
+        """
+        if kind == "async":
+            pytest.importorskip("httpx", reason="the async transport needs the [async] extra")
+        with serving(redirect_chain(4), keep_alive=True) as server:
+            assert fetch(kind, f"http://127.0.0.1:{server.server_port}/0") == "FINAL"
+            accepted = server.accepted
+        assert accepted == 1, f"a 4-hop chain opened {accepted} connections"
 
     def test_an_oversize_body_is_not_read_to_the_end(self):
         from googlenewsdecoder.transports import Urllib3Transport
