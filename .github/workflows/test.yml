@@ -45,6 +45,25 @@ jobs:
           TEST_INSTALLED_PACKAGE: "1"
         run: pytest "$GITHUB_WORKSPACE/tests" -q
 
+  dependency-floor:
+    name: pytest at the declared dependency floor
+    runs-on: ubuntu-latest
+    # The matrix above installs whatever is newest, so every floor in setup.py is a claim nobody
+    # runs. That matters most for urllib3: the decompression guard rests entirely on
+    # `read(amt, decode_content=True)` bounding DECODED output, which is what >=2.7.0 is for.
+    # Pinning the floors here is what makes the version we declare the version we tested.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # The floor from python_requires too, so this job is the lowest supported everything.
+          python-version: "3.10"
+      - run: pip install . pytest "urllib3==2.7.0" "selectolax==0.3.27" "httpx==0.28.1"
+      - working-directory: /tmp
+        env:
+          TEST_INSTALLED_PACKAGE: "1"
+        run: pytest "$GITHUB_WORKSPACE/tests" -q
+
   import-without-extras:
     name: import with no extras installed
     runs-on: ubuntu-latest
