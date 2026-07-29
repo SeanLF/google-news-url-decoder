@@ -10,7 +10,9 @@ import functools
 import gzip
 import io
 import json
+import os
 import threading
+import time
 import tracemalloc
 import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -145,6 +147,34 @@ def peak_bytes(fn):
     finally:
         if not was_tracing:
             tracemalloc.stop()
+
+
+def open_fds():
+    """How many file descriptors this process holds. The direct measure of a released socket."""
+    return len(os.listdir("/dev/fd"))
+
+
+def inner_pools(manager):
+    """The HTTPConnectionPools inside a PoolManager -- the objects that hold the sockets.
+
+    A test measuring descriptors has to hold these, not the manager: `PoolManager.clear()` drops
+    its references to them, and refcounting then closes their sockets for free. Holding the
+    manager alone therefore cannot tell a real close from a forgotten one, which is how a `clear()`
+    that closes nothing went unnoticed. Something always holds these in practice -- an in-flight
+    request, or a response whose body was never drained.
+    """
+    # noqa on the next line: iterating a RecentlyUsedContainer raises NotImplementedError.
+    return [manager.pools.get(key) for key in manager.pools.keys()]  # noqa: SIM118
+
+
+def wait_until(predicate, timeout=2.0):
+    """Poll `predicate` briefly. Closing the client end takes a moment to reach the server's."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
 
 
 def gzipped(data):
@@ -439,6 +469,94 @@ class TestTheTwoTransportsDecodeAlike:
     def test_the_sync_transport_refuses_a_gzip_stream_that_was_cut(self):
         with serving(fixed_body(CUT_GZIP, encoding="gzip")) as server, pytest.raises(TransportError):
             fetch("sync", f"http://127.0.0.1:{server.server_port}/cut")
+
+
+class TestTheSyncTransportsPoolsHaveALifetime:
+    """A PoolManager per proxy, kept forever, on a library whose whole reason to pool is a
+    throttle counted per address. Rotating proxies is the normal way to work around that, so the
+    dict grew with the rotation and there was no way to give the sockets back.
+    """
+
+    def test_rotating_through_more_proxies_than_the_cap_does_not_grow_forever(self):
+        from googlenewsdecoder.transports import Urllib3Transport
+
+        transport = Urllib3Transport(max_pools=4)
+        # No requests needed: this is the dict's bound, and none of these has to resolve.
+        for i in range(20):
+            transport._pool(f"http://proxy{i}.invalid:8080")
+        assert len(transport._pools) == 4
+
+    def test_the_proxy_still_in_use_is_not_the_one_evicted(self):
+        """LRU, not insertion order: a rotation that keeps coming back to one proxy has to keep
+        that pool, since reuse is the entire reason these are cached.
+        """
+        from googlenewsdecoder.transports import Urllib3Transport
+
+        transport = Urllib3Transport(max_pools=4)
+        hot = "http://hot.invalid:8080"
+        first = transport._pool(hot)
+        for i in range(8):
+            transport._pool(f"http://proxy{i}.invalid:8080")
+            transport._pool(hot)  # touched throughout, so insertion order would have dropped it
+        assert transport._pool(hot) is first, "the pool in active use was evicted"
+
+    def test_close_hands_back_the_socket_rather_than_just_the_reference(self):
+        """Measured on descriptors, and with the connection pools still referenced.
+
+        Both halves matter. An accept count proves nothing, because after `close()` the dict is
+        empty and the next request must open a connection whether or not the old socket closed.
+        And descriptors prove nothing either while nothing holds the pools, because dropping the
+        last reference lets refcounting close the sockets for us -- which is precisely what hid
+        the fact that `PoolManager.clear()` closes nothing itself.
+        """
+        from googlenewsdecoder.transports import Urllib3Transport
+
+        with serving(fixed_body(b"ok"), keep_alive=True) as server:
+            url = f"http://127.0.0.1:{server.server_port}/x"
+            transport = Urllib3Transport()
+            assert transport(Request("GET", url, {}), timeout=10) == "ok"
+            assert transport(Request("GET", url, {}), timeout=10) == "ok"
+            assert server.accepted == 1, "the second request should have reused the connection"
+
+            held = inner_pools(transport._pool(None))
+            before = open_fds()
+            transport.close()
+            closed = wait_until(lambda: open_fds() < before)
+            assert held  # keep the connection pools alive across the measurement
+            assert closed, (
+                f"{before} descriptors before close() and still {open_fds()} after, with the "
+                "connection pools still referenced: the socket was forgotten, not closed"
+            )
+            assert transport(Request("GET", url, {}), timeout=10) == "ok", "still usable"
+
+    def test_eviction_hands_back_the_socket_too(self):
+        from googlenewsdecoder.transports import Urllib3Transport
+
+        with serving(fixed_body(b"ok"), keep_alive=True) as server:
+            url = f"http://127.0.0.1:{server.server_port}/x"
+            transport = Urllib3Transport(max_pools=2)
+            assert transport(Request("GET", url, {}), timeout=10) == "ok"
+
+            held = inner_pools(transport._pool(None))
+            before = open_fds()
+            # Two more proxies push the direct pool, now least recently used, off the end.
+            transport._pool("http://a.invalid:8080")
+            transport._pool("http://b.invalid:8080")
+            closed = wait_until(lambda: open_fds() < before)
+            assert held  # as above: an evicted pool someone still holds
+            assert closed, (
+                f"{before} descriptors before eviction and still {open_fds()} after: an evicted "
+                "pool is being forgotten rather than closed"
+            )
+
+    def test_it_can_be_used_as_a_context_manager(self):
+        from googlenewsdecoder.transports import Urllib3Transport
+
+        with serving(fixed_body(b"ok"), keep_alive=True) as server:
+            url = f"http://127.0.0.1:{server.server_port}/x"
+            with Urllib3Transport() as transport:
+                assert transport(Request("GET", url, {}), timeout=10) == "ok"
+            assert transport._pools == {}
 
 
 class TestACallerSuppliedClientStaysInsideTheContract:

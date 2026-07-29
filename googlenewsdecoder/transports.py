@@ -73,6 +73,7 @@ TransportError into `{"status": False, "message": ...}`, the only thing left to 
 `RateLimited` is not a TransportError, so it propagates out of `drive` to your loop untouched.
 """
 
+import collections
 import contextlib
 import threading
 import zlib
@@ -129,6 +130,13 @@ MAX_REDIRECTS = 10
 # body. The throttle on this endpoint counts connections, so a small declared remainder is
 # worth discarding; an unknown or large one is the peer's number to choose, not ours.
 MAX_DRAIN_BYTES = 1 << 20
+
+# Default number of proxies one transport keeps pools for, evicting least-recently-used.
+# Deliberately well above any rotation likely to be in play, because the cliff is sharp: a
+# rotation one larger than the cap cycles through it and rebuilds on every single request, which
+# on this endpoint is worse than the file descriptors the cap exists to bound. Callers with a
+# bigger list should say so -- `Urllib3Transport(max_pools=...)`.
+MAX_POOLS = 128
 
 # What urllib3 will actually decode. Anything else must be refused rather than passed through.
 _DECODERS = frozenset({"gzip", "deflate", "br", "zstd", "identity"})
@@ -220,6 +228,26 @@ def _bounded_decoder(encoding: str):
     raise TransportError(f"unsupported Content-Encoding: {encoding}")
 
 
+def _close_manager(manager) -> None:
+    """Close the sockets a PoolManager is holding, which `clear()` does not do.
+
+    `PoolManager.clear()` is documented to "direct them all to close" and does not: its
+    `RecentlyUsedContainer` is built with no `dispose_func` (urllib3 2.7.0), and clearing only
+    disposes when one is set. So `clear()` alone drops references and leaves the sockets to the
+    garbage collector -- never, for a pool anything else still holds. The docstring describes
+    urllib3 1.26, which did pass a dispose_func.
+
+    Uses `keys()`/`get()` rather than the container's internals, because those are the only
+    public way in: `__iter__` raises on purpose, calling itself unlikely to be threadsafe.
+    """
+    for key in manager.pools.keys():  # noqa: SIM118 -- iterating it raises NotImplementedError
+        inner = manager.pools.get(key)
+        if inner is not None:
+            with contextlib.suppress(Exception):
+                inner.close()
+    manager.clear()
+
+
 class Urllib3Transport(_HeaderMixin):
     """The default. Redirect resolution, connection pooling and decompression come from
     urllib3, which requests already depends on.
@@ -232,21 +260,49 @@ class Urllib3Transport(_HeaderMixin):
     `Location` headers. Hand-rolling that loop got the cookie right and the credential
     stripping wrong.
 
-    One PoolManager per proxy, kept on the instance. That is not only a latency saving: the
-    throttle on this endpoint counts CONNECTIONS, so an unpooled client is refused on every
-    address tested after 65-110 of them while a pooled one runs on a single connection. See
-    `probes/connections.py`.
+    One PoolManager per proxy, kept on the instance, up to `max_pools` of them and then
+    least-recently-used first. That is not only a latency saving: the throttle on this endpoint
+    counts CONNECTIONS, so an unpooled client is refused on every address tested after 65-110 of
+    them while a pooled one runs on a single connection. See `probes/connections.py`.
+
+    Which is also why the cap is generous and adjustable. Rotating through one more proxy than
+    it holds evicts each pool just before you return to it, so every request opens a connection
+    -- worse, on this endpoint, than the descriptors the cap is there to bound. Rotating through
+    more than 128, pass `max_pools`. `close()` hands the sockets back.
     """
 
-    def __init__(self, headers: dict | None = None):
+    def __init__(self, headers: dict | None = None, max_pools: int = MAX_POOLS):
         self.headers = headers
-        self._pools: dict[str | None, object] = {}
+        self._max_pools = max_pools
+        self._pools: collections.OrderedDict[str | None, object] = collections.OrderedDict()
         self._pools_lock = threading.Lock()
+
+    def close(self) -> None:
+        """Close every pooled connection. The transport stays usable; pools rebuild on demand.
+
+        Without this there was no way to hand back the sockets a long-lived decoder had
+        accumulated short of dropping the object and hoping a garbage collector got to it.
+        `HttpxAsyncTransport` has had `aclose()` all along.
+
+        Not for `default_transport()`: that instance is shared process-wide, and closing it
+        drops pools every decoder in the process is relying on.
+        """
+        with self._pools_lock:
+            pools, self._pools = self._pools, collections.OrderedDict()
+        for pool in pools.values():
+            _close_manager(pool)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
 
     def _pool(self, proxy: str | None):
         with self._pools_lock:
             pool = self._pools.get(proxy)
             if pool is not None:
+                self._pools.move_to_end(proxy)
                 return pool
             import urllib3
 
@@ -269,6 +325,13 @@ class Urllib3Transport(_HeaderMixin):
             else:
                 pool = urllib3.ProxyManager(proxy, retries=retries)
             self._pools[proxy] = pool
+            while len(self._pools) > self._max_pools:
+                # Least recently used first. A PoolManager per proxy kept forever is a
+                # descriptor leak the size of the caller's rotation. A connection another thread
+                # has checked out is unaffected and closes when its response does, which is
+                # urllib3's own documented behaviour for this.
+                _, evicted = self._pools.popitem(last=False)
+                _close_manager(evicted)
             return pool
 
     def __call__(self, request: Request, *, timeout: float | None = None, proxy: str | None = None) -> str:
