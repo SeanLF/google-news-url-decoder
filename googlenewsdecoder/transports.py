@@ -118,6 +118,11 @@ class _HeaderMixin:
 
 MAX_REDIRECTS = 10
 
+# Bytes we will read and throw away to keep a pooled connection alive after giving up on a
+# body. The throttle on this endpoint counts connections, so a small declared remainder is
+# worth discarding; an unknown or large one is the peer's number to choose, not ours.
+MAX_DRAIN_BYTES = 1 << 20
+
 # What urllib3 will actually decode. Anything else must be refused rather than passed through.
 _DECODERS = frozenset({"gzip", "deflate", "br", "zstd", "identity"})
 
@@ -212,19 +217,34 @@ class Urllib3Transport(_HeaderMixin):
                 # markup. brotli and zstd arrive from CDNs whether or not we advertised them.
                 raise TransportError(f"unsupported Content-Encoding: {encoding}")
             body = response.read(MAX_RESPONSE_BYTES + 1, decode_content=True)
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise TransportError(f"response exceeded {MAX_RESPONSE_BYTES} bytes decompressed")
         except urllib3.exceptions.HTTPError as e:
             # A body whose declared encoding does not match its content raises DecodeError
             # here, which a caller catching TransportError would never see.
+            self._give_up(response)
             raise TransportError(str(e)) from e
-        finally:
-            # drain, not release: an undrained body leaves a readable socket, so the pool
-            # discards the connection on next use. Measured 10 requests -> 10 connections on
-            # the error path, against 1 when drained -- and the throttle counts connections,
-            # so every 429 would have bought another one.
-            response.drain_conn()
-        if len(body) > MAX_RESPONSE_BYTES:
-            raise TransportError(f"response exceeded {MAX_RESPONSE_BYTES} bytes decompressed")
+        except BaseException:
+            self._give_up(response)
+            raise
+        # Drain rather than release: an undrained body leaves a readable socket, so the pool
+        # discards the connection on next use, measured 10 requests to 10 connections. Safe
+        # only here, where the body has been read in full and nothing remains.
+        response.drain_conn()
         return body.decode("utf-8", "replace")
+
+    @staticmethod
+    def _give_up(response) -> None:
+        """Abandon a body we will not use, keeping the connection only when that is cheap.
+
+        `length_remaining` is None on a chunked response, i.e. exactly when the remainder is
+        unbounded, so an unknown length has to count as too large.
+        """
+        remaining = response.length_remaining
+        if remaining is not None and remaining <= MAX_DRAIN_BYTES:
+            response.drain_conn()
+        else:
+            response.close()
 
 
 # The name this transport shipped under before it stopped being backed by `requests`. Kept
