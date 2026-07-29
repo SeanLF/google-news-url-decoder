@@ -39,13 +39,17 @@ stop around 80, and shared VPN exits stop between 22 and 43. Any constant baked 
 would be one of those numbers, and wrong for everyone else, which is why the package encodes
 none and leaves pacing to the caller's own transport wrapper.
 
-**An open question: does connection reuse change the budget?** One pooled run reached 15,256
-article GETs across nine exits with no 429, where unpooled clients are refused after 19-63.
-That is a real observation with no established cause. The first attempt to test it was
-confounded -- `retries=False` left the pooled arm not following redirects, so it did one hop
-per token against the unpooled arm's three, and "survived longer" partly meant "did less
-work". The corrected re-run could not separate them because every exit was already spent.
-Re-run `connections.py` on rested addresses before believing either answer.
+**Connection reuse dominates the budget.** One arm per address, on addresses never used
+before: unpooled clients refused 4 of 4 after 24-88 articles and 72-179 connections; pooled
+refused 1 of 5, the rest reaching ~100 articles on 1-6 connections. Not a clean per-connection
+count (the one pooled refusal came at 92 requests over 3 connections), so the mechanism is
+open, but the lever is not.
+
+Two arms on ONE address cannot measure this, and it took two confounded runs to see why. They
+share that address's budget, so the second arm inherits the remains -- 8 of 11 pooled arms
+refused at request 1 right after a fresh arm spent it. An earlier attempt failed differently:
+`retries=False` left the pooled arm not following redirects, so it fetched no article at all
+and "survived longer" meant "did a third of the work". Use `ARM=` on separate, rested exits.
 
 Token age is not a factor: tokens collected weeks earlier still decode.
 

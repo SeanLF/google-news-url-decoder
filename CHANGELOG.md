@@ -124,11 +124,18 @@ and no rate-limit headers. Three things measured, in case they save you the expe
   better than datacenter and VPN addresses in the same window.
 - **IPv4 and IPv6 are different addresses**, so a dual-stack host has two budgets. Measured
   with one host's IPv6 refusing every request while its IPv4 answered in the same minute.
-- **Unexplained:** one pooled run reached 15,256 article GETs across nine addresses with no
-  429 at all, against 19-63 unpooled. Connection reuse is the obvious suspect and is NOT
-  established -- the probe written to test it gave the pooled arm fewer hops per token, and a
-  corrected re-run could not separate the two because every address was already spent. Treat
-  the pooled figure as an observation without a cause. `probes/connections.py`.
+- **Connection reuse dominates how much you get.** One arm per address, on eleven addresses
+  never used before, each arm doing the same work: clients opening a fresh connection per
+  request were refused 4 of 4, after 24-88 articles and 72-179 connections. Pooled clients
+  were refused 1 of 5, the rest reaching the token supply's end at ~100 articles on 1-6
+  connections. It is not a clean per-connection count -- the one pooled refusal came at 92
+  requests over 3 connections -- so the mechanism is not fully characterised, but pooling is
+  the lever. The default transport pools, and `decode()` shares one. `probes/connections.py`.
+
+  Design note, because it bit twice: both arms on one address cannot answer this. They share
+  that address's budget, so whichever runs second inherits the remains -- 8 of 11 pooled arms
+  were refused at request 1 straight after a fresh arm spent it. Use `ARM=fresh` / `ARM=pooled`
+  on separate exits.
 
 ## 0.1.7 and earlier
 

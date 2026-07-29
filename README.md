@@ -89,8 +89,10 @@ rate-limit headers. Two things are worth knowing before you build on it:
   total.
 - How much you get **depends on the address**: residential fares several times better than
   datacenter or VPN.
-- One pooled run reached 15,256 article GETs with no 429, against 19-63 unpooled. Connection
-  reuse is the obvious suspect and is **not** established; see `probes/README.md`.
+- **Reuse connections.** Measured one arm per address on previously unused addresses: clients
+  opening a connection per request were refused 4 of 4 after 24-88 articles; pooled clients
+  were refused 1 of 5, the rest running to the end of the token supply. The default transport
+  pools and `decode()` shares one, so this is already done for you.
 
 So this package ships no rate limiter: adapting the rate cannot buy more of a fixed budget.
 On a 429 you usually want to stand down for the rest of the batch. A transport is a plain

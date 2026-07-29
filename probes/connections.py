@@ -27,6 +27,11 @@ import urllib3
 from _common import HEADERS, article_url, classify, emit, require_tokens
 
 LIMIT = int(os.environ.get("LIMIT", "120"))
+# ONE arm per address. Running both against the same exit cannot answer the question: they
+# share that address's budget, so whichever runs second inherits what the first left and is
+# refused early for reasons that have nothing to do with pooling. Measured: 8 of 11 pooled
+# arms refused at request 1, immediately after the fresh arm had spent the budget.
+ARM = os.environ.get("ARM", "both")
 
 connects = {"n": 0}
 
@@ -125,10 +130,15 @@ def pooled_fetch(url):
     return resp.data.decode("utf-8", "replace")
 
 
-half = min(LIMIT, len(tokens) // 2)
-# fresh runs first and spends budget the pooled arm then starts from, which biases against
-# pooling. That is the safe direction for the conclusion this probe is used to support.
-run("fresh", fresh_fetch, tokens[:half])
-run("pooled", pooled_fetch, tokens[half : half * 2])
+out["arm"] = ARM
+if ARM == "both":
+    # Both arms on one exit share that exit's budget: whichever runs second starts from what
+    # the first left. Measured, 8 of 11 pooled arms were refused at request 1 immediately
+    # after a fresh arm had spent it. Use ARM=fresh / ARM=pooled on SEPARATE exits to compare.
+    half = min(LIMIT, len(tokens) // 2)
+    run("fresh", fresh_fetch, tokens[:half])
+    run("pooled", pooled_fetch, tokens[half : half * 2])
+else:
+    run(ARM, fresh_fetch if ARM == "fresh" else pooled_fetch, tokens[:LIMIT])
 
 emit(**out)
