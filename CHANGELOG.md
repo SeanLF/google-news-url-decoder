@@ -115,17 +115,20 @@ now validates what it returns: an http(s) scheme, a real host, and no control ch
 Google throttles this endpoint **per IP address**, with no published limit, no `Retry-After`
 and no rate-limit headers. Three things measured, in case they save you the experiment:
 
-- **It counts TCP connections, not requests.** Measured across nine addresses: a client
-  opening a fresh connection per request was refused on all nine after 65-110 connections,
-  while a pooled client made 50 requests over **one** connection on every one of them and was
-  never refused. A pooled run reached 15,256 article GETs without a single 429. So reuse your
-  connections; the default transport does. `probes/connections.py`.
-- **Pacing does not raise the total**, which follows: spacing requests out does not open fewer
-  connections. Spending it slowly buys nothing.
+- It behaves as a **budget, not a rate**. Requests run clean until the budget is gone; pacing
+  them out does not raise the total. Replicated across nine addresses: all nine were refused
+  after 19-63 article GETs, unpooled.
+- **Only the article-page GET counts.** Batching collapses the POSTs, so it saves round trips
+  without reducing exposure.
 - **How much you get depends on the address.** A residential connection fared several times
   better than datacenter and VPN addresses in the same window.
 - **IPv4 and IPv6 are different addresses**, so a dual-stack host has two budgets. Measured
   with one host's IPv6 refusing every request while its IPv4 answered in the same minute.
+- **Unexplained:** one pooled run reached 15,256 article GETs across nine addresses with no
+  429 at all, against 19-63 unpooled. Connection reuse is the obvious suspect and is NOT
+  established -- the probe written to test it gave the pooled arm fewer hops per token, and a
+  corrected re-run could not separate the two because every address was already spent. Treat
+  the pooled figure as an observation without a cause. `probes/connections.py`.
 
 ## 0.1.7 and earlier
 

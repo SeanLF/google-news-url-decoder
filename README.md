@@ -84,13 +84,13 @@ result = await decode_async(url)
 Google throttles this endpoint per IP address and publishes no limit, no `Retry-After`, and no
 rate-limit headers. Two things are worth knowing before you build on it:
 
-- **It counts connections, not requests.** An unpooled client was refused on nine of nine
-  addresses after 65-110 TCP connections; a pooled one made 50 requests over a single
-  connection on every one and was never refused. Reuse connections, and the default transport
-  does. See `probes/connections.py`.
-- **Pacing does not raise the total**, which follows from the above.
+- The **article-page fetch** draws the throttling, and it behaves as a budget rather than a
+  rate: nine of nine addresses were refused after 19-63 of them, and pacing did not raise the
+  total.
 - How much you get **depends on the address**: residential fares several times better than
   datacenter or VPN.
+- One pooled run reached 15,256 article GETs with no 429, against 19-63 unpooled. Connection
+  reuse is the obvious suspect and is **not** established; see `probes/README.md`.
 
 So this package ships no rate limiter: adapting the rate cannot buy more of a fixed budget.
 On a 429 you usually want to stand down for the rest of the batch. A transport is a plain

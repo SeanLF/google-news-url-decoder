@@ -1,11 +1,12 @@
-"""TLS fingerprint is NOT why Google walls one client and not another. Kept as the proof.
+"""Do urllib and requests hand Google different TLS handshakes, and can that be closed?
 
-`stdlib_like_context()` closes urllib3's two deviations from a stdlib context, making
-`requests` present a JA4 byte-identical to urllib's. Against a walled address that client was
-still served the interstitial. See `probes/README.md` for the cause and the ruled-out list.
+`stdlib_like_context()` undoes urllib3's two deviations from a stdlib context. This reports
+whether that makes `requests` present a JA4 identical to urllib's; the separate observation
+that such a client is STILL walled is in `probes/README.md`, which is what rules the
+fingerprint out as the cause. This script does not establish that on its own.
 
-Makes no Google requests, so it costs nothing against the article budget and runs from an
-address that is currently refused.
+Talks only to a fingerprinting endpoint, so it costs nothing against the article budget and
+runs from an address Google is currently refusing.
 
     python probes/tls_fingerprint.py
 """
@@ -79,6 +80,13 @@ try:
     patched_ja4, patched_exts = _read(_by_requests(stdlib_like_context()))
 except Exception as e:
     emit(error=f"{type(e).__name__}: {e}")
+    raise SystemExit(1)
+
+# A payload without a ja4 leaves all three None, and None == None would then report every
+# fingerprint as matching -- the probe's headline finding, from having measured nothing.
+if not (urllib_ja4 and default_ja4 and patched_ja4):
+    emit(error=f"no ja4 from {ENDPOINT}", urllib_ja4=urllib_ja4,
+         requests_ja4=default_ja4, requests_patched_ja4=patched_ja4)
     raise SystemExit(1)
 
 emit(

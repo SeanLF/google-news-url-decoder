@@ -9,10 +9,23 @@ import urllib.request
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
+# What every non-urllib arm sends. Identical across probes on purpose: the arms differ by
+# client, and a header that drifted between them would be a second variable.
+HEADERS = {"User-Agent": UA, "Accept-Encoding": "gzip"}
 # Optional labels for the address under test, echoed into every result line. Useful when
 # running the same probe from several addresses and comparing; ignorable otherwise.
 EXIT = os.environ.get("EXIT_NAME", "?")
 IP = os.environ.get("EXIT_IP", "?")
+
+
+def article_url(token):
+    """The page the raw-fetch arms request."""
+    return f"https://news.google.com/articles/{token}"
+
+
+def rss_url(token):
+    """The form a caller actually holds, and the only one the library accepts."""
+    return f"https://news.google.com/rss/articles/{token}?oc=5"
 
 
 def get(url, cookie=None, gzip_ok=True):
@@ -53,6 +66,24 @@ def fresh_tokens(query="world", limit=200):
     return dedupe(re.findall(r"/rss/articles/([A-Za-z0-9_\-]+)", body))[:limit]
 
 
+def require_tokens(n=1, **kw):
+    """Fresh tokens, or one JSON error line and exit. Never a traceback and no line at all.
+
+    Every wall probe indexes a fixed slot per arm (`tokens[3]`), so a short feed raised
+    IndexError after the harness had already paid for the run, and the row simply went missing.
+    A missing row reads as "not run yet"; a row saying the feed was short reads as what happened.
+    """
+    try:
+        tokens = fresh_tokens(**kw)
+    except Exception as e:
+        emit(error=f"token fetch failed: {type(e).__name__}: {e}")
+        raise SystemExit(1)
+    if len(tokens) < n:
+        emit(error=f"feed returned {len(tokens)} tokens, need {n}")
+        raise SystemExit(1)
+    return tokens
+
+
 def classify(body):
     """What did Google actually serve us?"""
     if re.search(r'data-n-a-sg="[^"]+"', body):
@@ -60,6 +91,32 @@ def classify(body):
     if "Before you continue" in body or "consent.google" in body:
         return "consent"
     return "unknown"
+
+
+def record_body(out, label, body, size=None):
+    """Store what Google served under `label`, plus its size -- the pair every wall probe emits.
+
+    `size` is for callers that already know the byte count. Left None it falls back to the
+    length of the decoded text, which is characters, not bytes; the two differ on non-ASCII
+    markup, so do not compare a `_kb` taken one way against one taken the other.
+    """
+    out[label] = classify(body)
+    out[label + "_kb"] = round((len(body) if size is None else size) / 1024)
+
+
+def library_decode(token, timeout=30):
+    """One decode through whatever sync transport this build ships. Returns (status, detail).
+
+    Five probes carry this arm, and it is the only line in any of them that speaks for
+    production, so it is the last one that should be allowed to drift between them. Imported
+    lazily and by its old alias so the probe still runs against a build predating the rename.
+    """
+    from googlenewsdecoder import decode_flow, drive
+    from googlenewsdecoder.transports import RequestsTransport
+
+    result = drive(decode_flow(rss_url(token)), RequestsTransport(), timeout=timeout)
+    detail = str(result.get("message") or result.get("decoded_url"))[:80]
+    return ("decoded" if result.get("status") else "failed"), detail
 
 
 def spend_until_refused(tokens, gap=0.4, on_each=None):

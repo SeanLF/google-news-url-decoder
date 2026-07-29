@@ -1,69 +1,70 @@
 """Is the throttle counted per request, or per TCP connection?
 
-`degrade.py` (urllib, a fresh connection per GET) is refused at ~28 requests. A pooled urllib3
-run made 15,256 article GETs across nine exits with no 429 at all. The one thing that differs
-is connection reuse, so this counts connections directly rather than inferring them.
+`degrade.py` (urllib, a fresh connection per GET) is refused around 28 requests, where pooled
+runs recorded elsewhere went far further. Connection reuse is the difference, so this counts
+connects directly instead of inferring them: both `create_connection` implementations are
+wrapped, and two arms run on one exit off one token supply, each stopping at the first 429.
 
-`socket.create_connection` is wrapped to tally real TCP connects. Two arms on one exit, same
-token supply, each stopping at the first 429:
-
-    fresh   -- a new urllib opener per request, so connections == requests
+    fresh   -- a new urllib opener per request, so one connection per redirect hop
     pooled  -- one urllib3 PoolManager(maxsize=1), so connections should stay near 1
 
-If the budget is per request, both stop at a similar request count. If it is per connection,
-the pooled arm should run far longer, and the ratio of requests-to-connections is also the
-measurement of what pooling buys -- the claim the transport docstring makes and I never
-checked.
+Per request, both stop at a similar request count; per connection, pooled runs longer and
+`*_requests / *_connections` is what pooling buys. Each arm is capped at half the token
+supply, so this measures the ratio, not the ceiling -- a `pooled_refused_at: null` may only
+mean the tokens ran out.
 """
 
+import gzip
 import os
 import socket
 import sys
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _common import UA, classify, emit, fresh_tokens
+import urllib3
+from _common import HEADERS, article_url, classify, emit, require_tokens
 
-HEADERS = {"User-Agent": UA, "Accept-Encoding": "gzip"}
 LIMIT = int(os.environ.get("LIMIT", "120"))
 
 connects = {"n": 0}
 
 
 def _install_connection_counter():
-    """Count real TCP connects. urllib3 does not go through socket.create_connection -- it has
-    its own wrapper in urllib3.util.connection -- so patching only the stdlib undercounts it
-    to zero, which is what the first version of this probe reported."""
-    real = socket.create_connection
+    """Count real TCP connects, on both paths and without double-counting either.
 
-    def counting(*a, **kw):
+    urllib3 does not call `socket.create_connection`; it has its own copy in
+    `urllib3.util.connection` that goes straight to `socket.socket()` + `connect()`. So the
+    two wrappers below are disjoint, and patching only the stdlib one undercounted urllib3 to
+    zero -- which is what the first version of this probe reported.
+
+    `urllib3.connection` reaches its copy as a module attribute (`connection.create_connection`
+    at call time), so patching the module it lives in is enough and is the only patch that
+    takes effect.
+    """
+    real_socket = socket.create_connection
+    real_u3 = urllib3.util.connection.create_connection
+
+    def counting_socket(*a, **kw):
         connects["n"] += 1
-        return real(*a, **kw)
-
-    socket.create_connection = counting
-
-    import urllib3.util.connection as u3conn
-
-    real_u3 = u3conn.create_connection
+        return real_socket(*a, **kw)
 
     def counting_u3(*a, **kw):
         connects["n"] += 1
         return real_u3(*a, **kw)
 
-    u3conn.create_connection = counting_u3
-    import urllib3.connection as u3c
-
-    u3c.create_connection = counting_u3
+    socket.create_connection = counting_socket
+    urllib3.util.connection.create_connection = counting_u3
 
 
 _install_connection_counter()
 
-try:
-    tokens = fresh_tokens()
-except Exception as e:
-    emit(error=f"token fetch failed: {type(e).__name__}: {e}")
-    raise SystemExit(1)
+tokens = require_tokens(2)
 
+# Each arm gets half the supply, so LIMIT above len(tokens)//2 cannot be reached. Recorded as
+# asked for, not as spent: compare `*_requests` against it before reading a `refused_at: null`
+# as "never refused" rather than "ran out of tokens".
 out = {"limit": LIMIT, "tokens": len(tokens)}
 
 
@@ -74,11 +75,15 @@ def run(label, fetch, supply):
     refused_at = None
     for i, tok in enumerate(supply, 1):
         try:
-            body = fetch(f"https://news.google.com/articles/{tok}")
-        except Exception as e:
-            if "429" in str(e):
+            body = fetch(article_url(tok))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
                 refused_at = i
                 break
+            # NOTE: a dead article and a body we could not classify both land in `unknown`.
+            kinds["unknown"] += 1
+            continue
+        except Exception:
             kinds["unknown"] += 1
             continue
         if body is None:
@@ -92,10 +97,9 @@ def run(label, fetch, supply):
 
 
 def fresh_fetch(url):
-    import gzip
-    import urllib.request
-
-    # A new opener every call: no pooling, so one connection per request.
+    # A new opener every call: no pooling, so one connection per HOP. Note that this opener
+    # follows redirects and the pooled arm below does not, so on an exit that 302s to the
+    # consent host the two arms are not doing equal work. Read `*_kinds` before comparing.
     opener = urllib.request.build_opener()
     with opener.open(urllib.request.Request(url, headers=HEADERS), timeout=25) as r:
         raw = r.read()
@@ -104,9 +108,14 @@ def fresh_fetch(url):
     return raw.decode("utf-8", "replace")
 
 
-import urllib3
-
-pool = urllib3.PoolManager(maxsize=1, retries=False)
+# retries=False also disables redirect following, so a 3xx comes back as the stub body and
+# classifies as "unknown" rather than raising.
+# Redirects MUST be followed here. `retries=False` yields redirect=0, so the pooled arm
+# returned 302 stubs and fetched no article at all -- it then "survived longer" only by
+# doing a third of the work, which invalidated the first run of this probe.
+pool = urllib3.PoolManager(
+    maxsize=1, retries=urllib3.Retry(total=None, redirect=10, other=0, raise_on_status=False)
+)
 
 
 def pooled_fetch(url):
@@ -117,6 +126,8 @@ def pooled_fetch(url):
 
 
 half = min(LIMIT, len(tokens) // 2)
+# fresh runs first and spends budget the pooled arm then starts from, which biases against
+# pooling. That is the safe direction for the conclusion this probe is used to support.
 run("fresh", fresh_fetch, tokens[:half])
 run("pooled", pooled_fetch, tokens[half : half * 2])
 

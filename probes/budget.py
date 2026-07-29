@@ -1,11 +1,15 @@
 """What does one decode cost against the per-address budget, and how many do you get?
 
-Two numbers. `article_gets_per_decode` is a ratio measured inside one run, so it needs no
-second arm and survives a partly-spent budget. `first_429_at` is the ceiling, which does not.
+Two numbers, and only the first is solid. `article_gets_per_decode` is a ratio measured inside
+one run, so it needs no second arm and survives a partly-spent budget. `first_429_at` is a
+LOWER BOUND on the ceiling, not the ceiling: with WORKERS in flight, later-indexed tokens
+complete before the first refusal lands, so the address accepted at least that many and
+usually more. Run WORKERS=1 if you want the ceiling itself.
 
-Counting happens at `requests.Session.request`, not at the transport, because the transport
-follows the redirect chain internally -- wrapping the transport would see one call where four
-requests went out.
+Counting happens at the HTTP client, not at the transport, because the transport hands its
+whole redirect chain to the client in one call -- wrapping the transport would see one request
+where four went out. The patch below therefore has to name the client the transport actually
+uses; if that changes, the counter silently reads zero and the run says so on stderr.
 
     ./probe SI-38 budget LIMIT=400 WORKERS=10
 """
@@ -18,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _common import emit, fresh_tokens
+from _common import dedupe, emit, fresh_tokens, rss_url
 
 LIMIT = int(os.environ.get("LIMIT", "60"))
 # The throttle is a per-address budget counted in requests, not a rate, and the one rate
@@ -53,15 +57,12 @@ def _install_counter():
     requests.Session.request = counting
 
 
-tokens, seen = [], set()
+tokens = []
 for q in QUERIES:
     if len(tokens) >= LIMIT:
         break
     try:
-        for t in fresh_tokens(query=q.strip()):
-            if t not in seen:
-                seen.add(t)
-                tokens.append(t)
+        tokens = dedupe(tokens + fresh_tokens(query=q.strip()))
     except Exception as e:
         print(f"query {q!r} failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
 tokens = tokens[:LIMIT]
@@ -83,7 +84,9 @@ def _record(field, refusal=None):
     with _state_lock:
         state[field] += 1
         state["done"] += 1
-        if refusal:
+        # First refusal wins. A worker still in flight when the 429 lands would otherwise
+        # overwrite "429" with its own error name, and the run would report the wrong cause.
+        if refusal and state["refusal"] is None:
             state["refusal"] = refusal
         if state["done"] % 50 == 0:
             print(
@@ -99,11 +102,7 @@ def _decode(numbered):
     if _stop.is_set():
         return
     try:
-        result = drive(
-            decode_flow(f"https://news.google.com/rss/articles/{tok}?oc=5"),
-            RequestsTransport(),
-            timeout=30,
-        )
+        result = drive(decode_flow(rss_url(tok)), RequestsTransport(), timeout=30)
     except TransportError as e:
         if getattr(e, "status", None) == 429:
             # First refusal by TOKEN order, not completion order: with WORKERS in flight the
@@ -127,8 +126,21 @@ def _decode(numbered):
 with ThreadPoolExecutor(max_workers=WORKERS) as pool:
     list(pool.map(_decode, enumerate(tokens, 1)))
 
+# A decode cannot cost zero article GETs, so zero means the counter is not attached to the
+# code under test -- not a cheap decode. Report the ratio as null rather than as 0.0, which
+# reads like a measurement and would be cited as one.
+counter_attached = counts["article_get"] > 0
+if state["decoded"] and not counter_attached:
+    print(
+        "WARNING: counted 0 article GETs across "
+        f"{state['decoded']} decodes -- the requests.Session.request patch saw nothing. "
+        "Check which client the transport uses before trusting this row.",
+        file=sys.stderr,
+        flush=True,
+    )
+
 emit(
-    has_consent_fix=hasattr(transports, "_follow_without_cookies"),
+    has_consent_fix=hasattr(transports, "Urllib3Transport"),
     workers=WORKERS,
     tokens=len(tokens),
     attempted=state["decoded"] + state["failed"],
@@ -140,6 +152,8 @@ emit(
     consent_gets=counts["consent_get"],
     posts=counts["post"],
     article_gets_per_decode=(
-        round(counts["article_get"] / state["decoded"], 2) if state["decoded"] else None
+        round(counts["article_get"] / state["decoded"], 2)
+        if state["decoded"] and counter_attached
+        else None
     ),
 )

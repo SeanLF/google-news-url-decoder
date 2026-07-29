@@ -39,12 +39,13 @@ stop around 80, and shared VPN exits stop between 22 and 43. Any constant baked 
 would be one of those numbers, and wrong for everyone else, which is why the package encodes
 none and leaves pacing to the caller's own transport wrapper.
 
-**The unit is the TCP connection, not the request.** An unpooled client was refused on 9 of 9
-exits after 65-110 connections; a pooled one made 50 requests over a single connection on every
-one of those same exits, in the same minutes, and was never refused. A pooled run reached
-15,256 article GETs with no 429 at all. This supersedes an earlier reading here that the limit
-was a per-request budget: the observation was right, the unit was wrong, and it explains why
-pacing never helped — spacing requests out does not open fewer connections. `connections.py`.
+**An open question: does connection reuse change the budget?** One pooled run reached 15,256
+article GETs across nine exits with no 429, where unpooled clients are refused after 19-63.
+That is a real observation with no established cause. The first attempt to test it was
+confounded -- `retries=False` left the pooled arm not following redirects, so it did one hop
+per token against the unpooled arm's three, and "survived longer" partly meant "did less
+work". The corrected re-run could not separate them because every exit was already spent.
+Re-run `connections.py` on rested addresses before believing either answer.
 
 Token age is not a factor: tokens collected weeks earlier still decode.
 
