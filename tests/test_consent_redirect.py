@@ -242,7 +242,119 @@ class TestAsyncTransportIsCookieless:
                     Request("GET", "https://news.example/start", {}), timeout=10
                 )
             )
-        assert len(hops) == MAX_REDIRECTS
+        # MAX_REDIRECTS redirects means one more request than that. This asserted equality with
+        # MAX_REDIRECTS, i.e. a budget of 10 REQUESTS and so 9 redirects, where urllib3 gives the
+        # sync transport 10 redirects from the same constant -- a chain of exactly 10 resolved
+        # through one transport and was refused by the other.
+        assert len(hops) == MAX_REDIRECTS + 1
+
+    def test_a_chain_of_exactly_max_redirects_still_resolves(self):
+        """The boundary the mismatch was hiding: both transports must accept this."""
+        httpx = pytest.importorskip("httpx")
+
+        from googlenewsdecoder.transports import MAX_REDIRECTS, HttpxAsyncTransport
+
+        seen = []
+
+        def handler(request):
+            seen.append(request.url)
+            if len(seen) <= MAX_REDIRECTS:
+                return httpx.Response(302, headers={"Location": f"https://news.example/{len(seen)}"})
+            return httpx.Response(200, text="ok")
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        body = asyncio.run(
+            HttpxAsyncTransport(client=client)(Request("GET", "https://news.example/start", {}), timeout=10)
+        )
+        assert body == "ok"
+        assert len(seen) == MAX_REDIRECTS + 1
+
+    @pytest.mark.parametrize(
+        "location",
+        [
+            "//]/",
+            "http://[/",
+            "http://127.0.0.1:99999/x",
+            "data:text/html,x",
+            "javascript:alert(1)",
+            "http://xn--/",
+            "http://xn--a/",
+        ],
+        ids=[
+            "invalid-ipv6",
+            "unterminated-bracket",
+            "port-out-of-range",
+            "data-scheme",
+            "javascript-scheme",
+            "invalid-a-label",
+            "invalid-a-label-codepoint",
+        ],
+    )
+    def test_a_malformed_location_stays_inside_the_contract(self, location):
+        """Every one of these left the transport as something `drive_async` does not catch, so
+        one bad Location took every already-decoded result in the batch with it.
+
+        Three different escapes, which is why the list is this long: stdlib's parser raises
+        ValueError on the bracket cases, httpx's URL layer raises InvalidURL on a scheme with no
+        authority and an idna error (a UnicodeError, so a ValueError) on an invalid A-label, and
+        an out-of-range port on an IP literal reaches connect and comes back as an
+        ExceptionGroup. The first group is caught before the request, the rest around it,
+        because httpx resolves the previous Location inside send().
+        """
+        httpx = pytest.importorskip("httpx")
+
+        from googlenewsdecoder.transports import HttpxAsyncTransport
+        from googlenewsdecoder.transports import TransportError as TE
+
+        def handler(request):
+            return httpx.Response(302, headers={"Location": location})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with pytest.raises(TE, match="malformed Location|unusable URL"):
+            asyncio.run(
+                HttpxAsyncTransport(client=client)(
+                    Request("GET", "https://news.example/start", {}), timeout=10
+                )
+            )
+
+    def test_a_caller_supplied_cookie_survives_the_chain_without_being_sent(self):
+        """The cookie rule was enforced by emptying `client.cookies` on every hop, which also
+        throws away cookies the caller set for their own use -- an auth cookie for a corporate
+        egress proxy, say. Dropping the header off our own requests achieves the same thing
+        without destroying their jar.
+
+        Not the same as leaving the jar untouched: httpx extracts Set-Cookie into it inside
+        `_send_single_request`, so Google's SOCS lands there either way. Asserted, because it is
+        the real contract -- nothing we send carries a cookie, and what the jar collects is the
+        caller's to deal with -- and because it fails loudly if httpx ever moves where cookies
+        are applied to a request.
+        """
+        httpx = pytest.importorskip("httpx")
+
+        from googlenewsdecoder.transports import HttpxAsyncTransport
+
+        sent = []
+
+        def handler(request):
+            sent.append(request.headers.get("cookie"))
+            if request.url.path == "/start":
+                return httpx.Response(
+                    302,
+                    headers={"Location": "https://news.example/article", "Set-Cookie": "SOCS=x; Path=/"},
+                )
+            return httpx.Response(200, text="ok")
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        client.cookies.set("mine", "keep-me", domain="news.example")
+        transport = HttpxAsyncTransport(client=client)
+        assert asyncio.run(transport(Request("GET", "https://news.example/start", {}), timeout=10)) == "ok"
+
+        assert all(cookie is None for cookie in sent), sent
+        assert client.cookies.get("mine", domain="news.example") == "keep-me"
+        assert client.cookies.get("SOCS", domain="news.example") == "x", (
+            "httpx extracts Set-Cookie into the caller's jar; if that ever stops being true, "
+            "the reason nothing replays it is no longer the popped header"
+        )
 
     def test_a_303_turns_a_post_into_a_get_without_its_body(self):
         httpx = pytest.importorskip("httpx")

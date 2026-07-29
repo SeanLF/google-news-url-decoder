@@ -19,6 +19,11 @@ credential stripping; httpx does not, so the async transport resolves the chain 
 applies both rules explicitly. `RequestsTransport` is an alias of `Urllib3Transport` --
 urllib3 is what `requests` uses underneath.
 
+The two are not identical on cookies, and the difference favours the async one: it drops the
+`Cookie` header from every request it sends, including one you set yourself, where urllib3
+forwards an explicit header and strips it only across origins. A decode has no use for a cookie,
+and sending one is what earns the interstitial.
+
 One deliberate difference from `requests`: environment `HTTP_PROXY`/`NO_PROXY` are not
 consulted, so pass `proxy=` explicitly. That makes an explicit proxy always win by
 construction, which is the behaviour the old urllib path reconstructed by hand.
@@ -366,7 +371,7 @@ class HttpxAsyncTransport(_HeaderMixin):
         # follow_redirects=False: this transport resolves the chain itself, because httpx
         # offers no way to disable cookies that survives one. Supplying a no-op CookieJar does
         # not work -- `Cookies.__init__` copies its contents into a fresh plain jar and drops
-        # the object -- so the jar is cleared per hop in `_follow` instead.
+        # the object -- so `_follow` drops the Cookie header off each request instead.
         self._client = client or httpx.AsyncClient(proxy=proxy, follow_redirects=False)
         self._owns_client = client is None
 
@@ -487,11 +492,16 @@ class HttpxAsyncTransport(_HeaderMixin):
         """
         from urllib.parse import urljoin, urlsplit
 
+        import httpx
+
         method, url, body = request.method, request.url, request.body
         headers = self._headers(request)
         origin = urlsplit(url)[:2]
-        for _ in range(MAX_REDIRECTS):
-            self._client.cookies.clear()
+        # MAX_REDIRECTS redirects, so one more request than that. `range(MAX_REDIRECTS)` spent
+        # the budget on requests instead, which is a different number from the one the sync side
+        # enforces -- urllib3's `redirect=MAX_REDIRECTS` counts hops -- so the same chain could
+        # resolve through one transport and be refused by the other.
+        for _ in range(MAX_REDIRECTS + 1):
             outgoing = self._client.build_request(
                 method,
                 url,
@@ -501,27 +511,52 @@ class HttpxAsyncTransport(_HeaderMixin):
                 # client got no timeout at all. Passing it through fixes that.
                 **({"timeout": timeout} if timeout is not None else {}),
             )
-            # stream=True so nothing is read until `_read_bounded` can refuse it. The caller
-            # closes the response it gets back; every hop this loop discards, it closes itself.
-            response = await self._client.send(
-                outgoing,
-                stream=True,
-                # Per request, not just on the client we build: a caller-supplied client with
-                # follow_redirects=True would resolve the chain internally and replay the cookie.
-                follow_redirects=False,
-            )
+            # build_request is where httpx bakes the client's jar into a Cookie header, so
+            # dropping it here is what keeps Google's consent wall shut. The previous version
+            # cleared `client.cookies` instead, which works but empties a jar the caller may own
+            # and may have populated for their own reasons.
+            outgoing.headers.pop("Cookie", None)
+            try:
+                # stream=True so nothing is read until `_read_bounded` can refuse it. The caller
+                # closes the response it gets back; every hop this loop discards, it closes here.
+                response = await self._client.send(
+                    outgoing,
+                    stream=True,
+                    # Per request, not just on the client we build: a caller-supplied client with
+                    # follow_redirects=True would resolve the chain internally and replay the cookie.
+                    follow_redirects=False,
+                )
+            except (httpx.InvalidURL, ValueError) as e:
+                # httpx resolves the previous hop's Location inside send(), even with
+                # follow_redirects=False, so this is where a Location its URL layer rejects
+                # surfaces -- `data:text/html,x` as InvalidURL, an `xn--` host as an idna error,
+                # which is a UnicodeError and so a ValueError. Guarding after send() returns, as
+                # an earlier version did, never saw either. Neither is a RequestError, so both
+                # left the transport untyped and abandoned the batch.
+                raise TransportError(f"unusable URL in redirect chain: {e}") from e
             if response.status_code not in _REDIRECT_STATUSES:
                 return response
             location = response.headers.get("Location")
             if not location:
                 return response
             await self._give_up(response)
-            url = urljoin(url, location)
-            if urlsplit(url)[:2] != origin:
+            try:
+                url = urljoin(url, location)
+                parsed = urlsplit(url)
+                parsed.port  # noqa: B018  -- raises outside 0-65535; port 0 parses and fails later
+                target = parsed[:2]
+            except ValueError as e:
+                # A bare ValueError from here is outside the TransportError contract that
+                # `drive_async` and every documented wrapper is told to catch, so it escaped and
+                # abandoned the batch. `urljoin` raises on "http://[/" and friends; the port is
+                # asked for separately because parsing accepts 99999 and httpx then fails on
+                # connect with an ExceptionGroup, which is outside the contract too.
+                raise TransportError(f"malformed Location header: {location!r}") from e
+            if target != origin:
                 # What urllib3 and browsers do: a credential scoped to one origin must not
                 # follow a redirect to another. The first version of this loop leaked it.
                 headers = {k: v for k, v in headers.items() if k.lower() not in _PER_ORIGIN}
-                origin = urlsplit(url)[:2]
+                origin = target
             if response.status_code == 303 or (response.status_code in (301, 302) and method == "POST"):
                 method, body = "GET", None
                 headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
