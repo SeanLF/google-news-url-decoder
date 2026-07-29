@@ -122,7 +122,9 @@ code would be someone's guess from their own address. What is measured (see `pro
 it behaves as a per-IP **budget rather than a rate**, only the article GET is counted, and the
 ceiling depends heavily on the address. Pacing does not raise the total.
 
-`transports.AdaptiveRateLimit` responds to what it observes rather than encoding a number.
+So this package ships no rate limiter, and adding one needs evidence, not plausibility: a
+limiter adapts the rate, and a rate cannot buy more of a fixed budget. Pacing belongs in a
+caller's transport wrapper.
 
 ## Style
 

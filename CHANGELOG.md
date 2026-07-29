@@ -8,6 +8,18 @@ unchanged and most code needs no edit.
 
 ### Fixed
 
+**The default transport walled itself on the consent interstitial.** `requests.request()`
+builds a Session per call, whose cookie jar replayed the `SOCS` cookie Google sets on the
+article's 302 back into `consent.google.com` — which is what makes that endpoint render its
+page instead of bouncing you to the article. urllib keeps no jar, hence reports that
+`UrllibTransport` worked where the default did not. The sync transport is now urllib3-backed,
+which implements no cookies at all and strips credentials cross-origin. httpx has no
+equivalent that survives a redirect chain — a no-op cookie jar alone was measured still
+leaking on the third hop — so the async transport resolves the chain itself and applies both
+rules explicitly. Only walled addresses were affected, so it was invisible from a residential
+connection. Ruled out first: TLS fingerprint, `Accept`, `Accept-Encoding`, `Connection`, and
+the `CONSENT` cookie (see `probes/README.md`).
+
 **A decoded URL could come back silently truncated.** The payload length inside an article
 token is a protobuf varint, but it was read as a single raw byte. That is only correct below
 128, so any embedded URL of 128 bytes or more lost its last character, and past 255 the length
@@ -60,16 +72,19 @@ fallback only fired on a transport exception, never on the case that needed it.
   how bytes move. The sync and async decoders were 88% the same code and are now one
   implementation with two drivers.
 - **A transport is any callable**, so your own client, session, retry policy, rate limiter or
-  tracing wrapper drops in. `requests` remains the default; `UrllibTransport` needs no
-  third-party dependency.
+  tracing wrapper drops in. The default is `Urllib3Transport`; `RequestsTransport` is an alias
+  of it, since urllib3 is what `requests` used underneath anyway.
 - **`TransportError` moved to `googlenewsdecoder.errors`**, and is still importable from
   `googlenewsdecoder` and from `googlenewsdecoder.transports` as before. It is the vocabulary
   shared by the algorithm and whatever performs the I/O, so it belongs to neither: while it
   lived in `transports`, writing your own driver meant importing the very module you were
   replacing. `protocol` and `flow` now import no transport at all.
 - **`decode_batch`** shares one POST across many articles and returns results in input order.
-- **Dependencies are two**: `requests` and `selectolax`. `httpx` and `PySocks` moved to the
+- **Dependencies are two**: `urllib3` and `selectolax`. `httpx` and `PySocks` moved to the
   `[async]` and `[socks]` extras, having previously been listed as required.
+- **Environment `HTTP_PROXY`/`NO_PROXY` are no longer consulted.** Chosen, not inherited: it
+  makes "an explicit proxy always wins" true by construction rather than by the workaround the
+  old urllib path needed. Pass `proxy=` explicitly.
 - **`python_requires` is 3.10**, up from 3.9 (end of security support: October 2025).
 - `get_decoding_params()` and `decode_url()` are no longer public methods; the same steps are
   pure functions in `protocol`.
@@ -100,15 +115,17 @@ now validates what it returns: an http(s) scheme, a real host, and no control ch
 Google throttles this endpoint **per IP address**, with no published limit, no `Retry-After`
 and no rate-limit headers. Three things measured, in case they save you the experiment:
 
-- It behaves as a **budget, not a rate**. Requests run clean until the budget is gone; pacing
-  them out does not raise the total. Spending it slowly buys nothing.
-- **Only the article-page GET counts.** Batching collapses the POSTs, so it saves round trips
-  without reducing exposure.
+- **It counts TCP connections, not requests.** Measured across nine addresses: a client
+  opening a fresh connection per request was refused on all nine after 65-110 connections,
+  while a pooled client made 50 requests over **one** connection on every one of them and was
+  never refused. A pooled run reached 15,256 article GETs without a single 429. So reuse your
+  connections; the default transport does. `probes/connections.py`.
+- **Pacing does not raise the total**, which follows: spacing requests out does not open fewer
+  connections. Spending it slowly buys nothing.
 - **How much you get depends on the address.** A residential connection fared several times
   better than datacenter and VPN addresses in the same window.
-
-`transports.AdaptiveRateLimit` adjusts pacing in response to 429s rather than asking you to
-guess a number that would be wrong on a different host.
+- **IPv4 and IPv6 are different addresses**, so a dual-stack host has two budgets. Measured
+  with one host's IPv6 refusing every request while its IPv4 answered in the same minute.
 
 ## 0.1.7 and earlier
 

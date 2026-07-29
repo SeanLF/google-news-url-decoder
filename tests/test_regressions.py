@@ -7,13 +7,12 @@ A fix without a test is a fix that comes back.
 import gzip
 import io
 import json
-import zlib
 
 import pytest
 
 from googlenewsdecoder import decode, decode_batch, protocol
 from googlenewsdecoder.limits import MAX_RESPONSE_BYTES
-from googlenewsdecoder.transports import TransportError, _decompress
+from googlenewsdecoder.transports import TransportError
 
 GOOGLE_URL = "https://news.google.com/rss/articles/TOKEN?oc=5"
 
@@ -99,38 +98,67 @@ class TestBatchContainsItsFailures:
 
 class TestDecompressionIsBounded:
     """A gzipped body can expand by orders of magnitude; a ~1 MB response was measured
-    expanding to 1 GB. And a body whose declared encoding does not match its content raised
-    BadGzipFile/zlib.error/EOFError, none of which a caller catching TransportError sees."""
+    expanding to 1 GB. urllib3 does NOT cap this itself -- measured returning a 33 MB body
+    from a 32 KB gzip -- so the transport reads bounded rather than preloading."""
+
+    def _serve(self, payload, encoding):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                if encoding:
+                    self.send_header("Content-Encoding", encoding)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
 
     def test_a_bomb_is_refused_rather_than_allocated(self):
+        from googlenewsdecoder.protocol import Request
+        from googlenewsdecoder.transports import Urllib3Transport
+
         buf = io.BytesIO()
         with gzip.GzipFile(fileobj=buf, mode="wb") as f:
             f.write(b"\0" * (MAX_RESPONSE_BYTES + 1024))
-        with pytest.raises(TransportError, match="exceeded"):
-            _decompress(buf.getvalue(), "gzip")
+        server = self._serve(buf.getvalue(), "gzip")
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/bomb"
+            with pytest.raises(TransportError, match="exceeded"):
+                Urllib3Transport()(Request("GET", url, {}), timeout=10)
+        finally:
+            server.shutdown()
 
     def test_an_ordinary_body_still_decompresses(self):
+        from googlenewsdecoder.protocol import Request
+        from googlenewsdecoder.transports import Urllib3Transport
+
         buf = io.BytesIO()
         with gzip.GzipFile(fileobj=buf, mode="wb") as f:
             f.write(b"<html>fine</html>")
-        assert _decompress(buf.getvalue(), "gzip") == b"<html>fine</html>"
+        server = self._serve(buf.getvalue(), "gzip")
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/ok"
+            assert Urllib3Transport()(Request("GET", url, {}), timeout=10) == "<html>fine</html>"
+        finally:
+            server.shutdown()
 
-    @pytest.mark.parametrize(
-        "encoding,payload",
-        [("gzip", b"not gzipped at all"), ("deflate", b"not deflated"), ("gzip", gzip.compress(b"x")[:5])],
-        ids=["gzip-lie", "deflate-lie", "truncated"],
-    )
-    def test_a_mismatched_encoding_raises_transport_error(self, encoding, payload):
-        with pytest.raises(TransportError):
-            _decompress(payload, encoding)
+    def test_a_mismatched_encoding_raises_transport_error(self):
+        from googlenewsdecoder.protocol import Request
+        from googlenewsdecoder.transports import Urllib3Transport
 
-    def test_an_unknown_encoding_fails_loudly_rather_than_returning_junk(self):
-        # Returning raw bytes would surface later as a confusing "no data attributes" parse
-        # failure, blaming Google's markup for a transport problem.
-        with pytest.raises(TransportError, match="unsupported"):
-            _decompress(b"\x1b\x2a brotli-ish", "br")
+        server = self._serve(b"not gzipped at all", "gzip")
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/lie"
+            with pytest.raises(TransportError):
+                Urllib3Transport()(Request("GET", url, {}), timeout=10)
+        finally:
+            server.shutdown()
 
-    def test_deflate_is_accepted_in_both_framings(self):
-        assert _decompress(zlib.compress(b"hello"), "deflate") == b"hello"
-        raw = zlib.compressobj(wbits=-zlib.MAX_WBITS)
-        assert _decompress(raw.compress(b"hello") + raw.flush(), "deflate") == b"hello"

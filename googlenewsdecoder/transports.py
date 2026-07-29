@@ -12,19 +12,22 @@ from anything -- structural typing, checked statically.
 
     GoogleDecoder(transport=my_transport)
 
-`requests` stays the default, so existing behaviour, proxy handling and dependencies are
-unchanged. `UrllibTransport` is offered for callers who would rather add no dependency at
-all; it is deliberately not the default, because `requests` does several things urllib
-does not -- transparent decompression, `NO_PROXY` that does not override an explicitly
-configured proxy, authenticated SOCKS -- and switching the default would quietly change
-all of them.
+The shipped transports are `Urllib3Transport` (sync default) and `HttpxAsyncTransport`.
+This decode needs a client that never replays a cookie across a redirect, because Google's
+consent endpoint walls one that does. urllib3 gives that for free, along with cross-origin
+credential stripping; httpx does not, so the async transport resolves the chain itself and
+applies both rules explicitly. `RequestsTransport` is an alias of `Urllib3Transport` --
+urllib3 is what `requests` uses underneath.
 
-**Concurrency.** `_protocol` is pure and stateless, so it is safe to share across threads,
-processes and event loops without qualification. Everything with a concurrency hazard in it
-is a transport, which is the caller's choice: the default `RequestsTransport` holds no state
-and is thread-safe but pools no connections; supply a `Session`-backed transport if you want
-pooling, and give each thread its own if you want both. `HttpxAsyncTransport` holds a client,
-which httpx supports for concurrent use within one event loop.
+One deliberate difference from `requests`: environment `HTTP_PROXY`/`NO_PROXY` are not
+consulted, so pass `proxy=` explicitly. That makes an explicit proxy always win by
+construction, which is the behaviour the old urllib path reconstructed by hand.
+
+**Concurrency.** `protocol` is pure and stateless, so it is safe to share across threads,
+processes and event loops without qualification. `Urllib3Transport` holds a PoolManager per
+proxy behind a lock and is safe to share; sharing one is also what you want, since the
+throttle counts connections. `HttpxAsyncTransport` holds a client, which httpx supports for
+concurrent use within one event loop.
 
 **Composition.** A transport is a callable, so wrapping one is ordinary decoration -- retries,
 caching, rate limiting and logging are all just another transport:
@@ -65,6 +68,7 @@ TransportError into `{"status": False, "message": ...}`, the only thing left to 
 `RateLimited` is not a TransportError, so it propagates out of `drive` to your loop untouched.
 """
 
+import threading
 from typing import Protocol, runtime_checkable
 
 # Re-exported, not defined here: `TransportError` moved to `errors` so that `flow` can name it
@@ -74,32 +78,18 @@ from .limits import MAX_RESPONSE_BYTES
 from .protocol import Request
 
 __all__ = [
-    "DEFAULT_COOKIE",
     "DEFAULT_USER_AGENT",
-    "AdaptiveRateLimit",
     "HttpxAsyncTransport",
     "RequestsTransport",
     "Transport",
     "TransportError",
-    "UrllibTransport",
+    "Urllib3Transport",
 ]
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
 )
-
-# Google serves a "Before you continue" consent interstitial to SOME addresses instead of the
-# article. It carries no signature, so the decode fails with a message about missing data
-# attributes that points at the markup rather than the real cause.
-#
-# UNVERIFIED as a fix. Observed once, on a walled address, that sending a consent choice
-# returned the article (1.06 MB) where omitting it returned the interstitial (661 KB). That
-# could not be reproduced through this transport, because the wall is address-dependent and
-# a walled address could not be obtained on demand afterwards. Sending this is harmless on
-# addresses that are not walled (checked: identical response with and without), so it stays
-# as a cheap best-effort -- but do not treat the interstitial as solved.
-DEFAULT_COOKIE = "CONSENT=YES+cb.20210328-17-p0.en+FX+000"
 
 
 @runtime_checkable
@@ -118,94 +108,128 @@ class _HeaderMixin:
     """
 
     def _headers(self, request: Request) -> dict:
-        merged = {"User-Agent": DEFAULT_USER_AGENT, "Cookie": DEFAULT_COOKIE}
+        # urllib3 sends `Accept-Encoding: identity` unless asked otherwise. Measured on a real
+        # article page: 1,130,320 bytes identity against 174,988 gzipped.
+        merged = {"User-Agent": DEFAULT_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
         merged.update(request.headers)
         merged.update(self.headers or {})
         return merged
 
 
-class RequestsTransport(_HeaderMixin):
-    """The default. Preserves the behaviour this package has always had.
+MAX_REDIRECTS = 10
 
-    Stateless, so it is safe to share across threads. It opens a fresh connection per
-    request; pass a `Session`-backed transport instead if you want connection pooling.
+# What urllib3 will actually decode. Anything else must be refused rather than passed through.
+_DECODERS = frozenset({"gzip", "deflate", "br", "zstd", "identity"})
+
+# Headers scoped to the origin that issued them; dropped on a cross-origin redirect.
+_PER_ORIGIN = frozenset({"authorization", "cookie", "proxy-authorization"})
+
+
+class Urllib3Transport(_HeaderMixin):
+    """The default. Redirect resolution, connection pooling and decompression come from
+    urllib3, which requests already depends on.
+
+    urllib3 implements no cookie support at all -- its pools are connection pools, not
+    stateful clients -- which is the property this decode needs: Google's consent endpoint
+    walls any client that replays the `SOCS` cookie it sets on the article's 302. It also
+    strips `Authorization`, `Cookie` and `Proxy-Authorization` on a cross-origin redirect,
+    drops `Content-Type` when a 303 turns a POST into a GET, and resolves relative
+    `Location` headers. Hand-rolling that loop got the cookie right and the credential
+    stripping wrong.
+
+    One PoolManager per proxy, kept on the instance. That is not only a latency saving: the
+    throttle on this endpoint counts CONNECTIONS, so an unpooled client is refused on every
+    address tested after 65-110 of them while a pooled one runs on a single connection. See
+    `probes/connections.py`.
     """
 
     def __init__(self, headers: dict | None = None):
         self.headers = headers
+        self._pools: dict[str | None, object] = {}
+        self._pools_lock = threading.Lock()
+
+    def _pool(self, proxy: str | None):
+        with self._pools_lock:
+            pool = self._pools.get(proxy)
+            if pool is not None:
+                return pool
+            import urllib3
+
+            # Redirects yes, retries no: a retry on this endpoint spends budget without
+            # recovering it, and the caller decides that policy by wrapping the transport.
+            retries = urllib3.Retry(
+                total=None, connect=0, read=0, status=0, other=0, redirect=MAX_REDIRECTS,
+                raise_on_status=False,
+            )
+            if proxy is None:
+                pool = urllib3.PoolManager(retries=retries)
+            elif proxy.lower().startswith("socks"):
+                try:
+                    from urllib3.contrib.socks import SOCKSProxyManager
+                except ImportError as e:
+                    raise TransportError(
+                        "SOCKS proxies need PySocks: pip install googlenewsdecoder[socks]"
+                    ) from e
+                pool = SOCKSProxyManager(proxy, retries=retries)
+            else:
+                pool = urllib3.ProxyManager(proxy, retries=retries)
+            self._pools[proxy] = pool
+            return pool
 
     def __call__(self, request: Request, *, timeout: float | None = None, proxy: str | None = None) -> str:
-        import requests
+        import urllib3
 
-        proxies = {"http": proxy, "https": proxy} if proxy else None
         try:
-            response = requests.request(
+            urllib3_timeout = urllib3.Timeout(total=timeout) if timeout is not None else None
+        except ValueError as e:
+            raise TransportError(f"invalid timeout: {e}") from e
+
+        try:
+            response = self._pool(proxy).request(
                 request.method,
                 request.url,
+                body=request.body,
                 headers=self._headers(request),
-                data=request.body,
-                proxies=proxies,
-                timeout=timeout,
+                timeout=urllib3_timeout,
+                # Read bounded rather than preloaded. urllib3 does NOT cap decompression --
+                # measured returning a 33 MB body from a 32 KB gzip -- so `.data` would
+                # allocate the bomb before any check of ours could refuse it.
+                preload_content=False,
             )
-            response.raise_for_status()
-            return response.text
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response is not None else None
-            raise TransportError(str(e), status=status) from e
-        except requests.exceptions.RequestException as e:
+        except urllib3.exceptions.HTTPError as e:
             raise TransportError(str(e)) from e
 
-
-class UrllibTransport(_HeaderMixin):
-    """A standard-library transport, for callers who want no dependencies at all.
-
-    Deliberately not the default; see the module docstring for what `requests` does that
-    this does not.
-    """
-
-    def __init__(self, headers: dict | None = None):
-        self.headers = headers
-
-    def __call__(self, request: Request, *, timeout: float | None = None, proxy: str | None = None) -> str:
-        import urllib.error
-        import urllib.request
-
-        # urllib has no SOCKS support: ProxyHandler would connect to the proxy host and
-        # speak HTTP at it, failing with a confusing "connection reset" rather than saying
-        # what is wrong. Refuse clearly instead -- RequestsTransport handles socks via PySocks.
-        if proxy and proxy.lower().startswith("socks"):
-            raise TransportError(
-                "UrllibTransport cannot use a SOCKS proxy; use RequestsTransport "
-                "(pip install googlenewsdecoder[socks]) or supply your own transport"
-            )
-        headers = self._headers(request)
-        # urllib sends `Accept-Encoding: identity` and does not decompress, so without this
-        # every article page arrives uncompressed. Measured on a real page: 1,130,320 bytes
-        # identity vs 174,988 gzipped -- 6.5x, and this endpoint rate-limits.
-        headers.setdefault("Accept-Encoding", "gzip, deflate")
-        req = urllib.request.Request(  # nosec B310 - https URLs built by protocol
-            request.url, data=request.body, headers=headers, method=request.method
-        )
-        if proxy:
-            # Set the proxy on the request rather than via ProxyHandler. ProxyHandler consults
-            # proxy_bypass() even for a proxy passed in explicitly, so an unrelated NO_PROXY in
-            # the environment silently routes traffic direct -- a caller using a proxy for
-            # egress control would lose it with no error. requests lets an explicit proxy win;
-            # match that. (Patching proxy_bypass globally would work and is not thread-safe.)
-            from urllib.parse import urlparse as _urlparse
-
-            parsed = _urlparse(proxy)
-            req.set_proxy(parsed.netloc, parsed.scheme)
         try:
-            with urllib.request.build_opener().open(req, timeout=timeout) as response:
-                raw = response.read()
-                encoding = (response.headers.get("Content-Encoding") or "").lower()
-        except urllib.error.HTTPError as e:
-            raise TransportError(f"HTTP {e.code}: {e.reason}", status=e.code) from e
-        except urllib.error.URLError as e:
-            raise TransportError(str(e.reason)) from e
+            # >= 300, not >= 400: a 3xx urllib3 declined to follow -- no Location, or a status
+            # outside its REDIRECT_STATUSES -- would otherwise be handed back as the article
+            # body, which is the failure this release exists to remove.
+            if response.status >= 300:
+                raise TransportError(f"HTTP {response.status}", status=response.status)
+            encoding = (response.headers.get("content-encoding") or "").lower()
+            if encoding and encoding not in _DECODERS:
+                # urllib3 installs a decoder only for encodings it knows and passes anything
+                # else through undecoded, which then becomes mojibake and is blamed on Google's
+                # markup. brotli and zstd arrive from CDNs whether or not we advertised them.
+                raise TransportError(f"unsupported Content-Encoding: {encoding}")
+            body = response.read(MAX_RESPONSE_BYTES + 1, decode_content=True)
+        except urllib3.exceptions.HTTPError as e:
+            # A body whose declared encoding does not match its content raises DecodeError
+            # here, which a caller catching TransportError would never see.
+            raise TransportError(str(e)) from e
+        finally:
+            # drain, not release: an undrained body leaves a readable socket, so the pool
+            # discards the connection on next use. Measured 10 requests -> 10 connections on
+            # the error path, against 1 when drained -- and the throttle counts connections,
+            # so every 429 would have bought another one.
+            response.drain_conn()
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise TransportError(f"response exceeded {MAX_RESPONSE_BYTES} bytes decompressed")
+        return body.decode("utf-8", "replace")
 
-        return _decompress(raw, encoding).decode("utf-8", "replace")
+
+# The name this transport shipped under before it stopped being backed by `requests`. Kept
+# importable for one minor; the behaviour it names is unchanged from a caller's side.
+RequestsTransport = Urllib3Transport
 
 
 class HttpxAsyncTransport(_HeaderMixin):
@@ -230,7 +254,11 @@ class HttpxAsyncTransport(_HeaderMixin):
 
         self.headers = headers
         self._proxy = proxy
-        self._client = client or httpx.AsyncClient(proxy=proxy, follow_redirects=True)
+        # follow_redirects=False: this transport resolves the chain itself, because httpx
+        # offers no way to disable cookies that survives one. Supplying a no-op CookieJar does
+        # not work -- `Cookies.__init__` copies its contents into a fresh plain jar and drops
+        # the object -- so the jar is cleared per hop in `_follow` instead.
+        self._client = client or httpx.AsyncClient(proxy=proxy, follow_redirects=False)
         self._owns_client = client is None
 
     async def __call__(self, request: Request, *, timeout: float | None = None, proxy: str | None = None) -> str:
@@ -248,15 +276,7 @@ class HttpxAsyncTransport(_HeaderMixin):
             )
 
         try:
-            response = await self._client.request(
-                request.method,
-                request.url,
-                headers=self._headers(request),
-                content=request.body,
-                # timeout was accepted and silently dropped, so a caller supplying their own
-                # client got no timeout at all. Passing it through fixes that.
-                **({"timeout": timeout} if timeout is not None else {}),
-            )
+            response = await self._follow(request, timeout)
             response.raise_for_status()
             return response.text
         except httpx.HTTPStatusError as e:
@@ -264,121 +284,67 @@ class HttpxAsyncTransport(_HeaderMixin):
         except httpx.RequestError as e:
             raise TransportError(str(e)) from e
 
+    async def _follow(self, request: Request, timeout: float | None):
+        """Resolve the redirect chain carrying neither cookies nor cross-origin credentials.
+
+        The sync side gets both from urllib3. httpx has no equivalent knob that survives the
+        chain, so the two rules are applied here explicitly.
+        """
+        from urllib.parse import urljoin, urlsplit
+
+        method, url, body = request.method, request.url, request.body
+        headers = self._headers(request)
+        origin = urlsplit(url)[:2]
+        for _ in range(MAX_REDIRECTS):
+            self._client.cookies.clear()
+            response = await self._client.request(
+                method,
+                url,
+                headers=headers,
+                content=body,
+                # Per request, not just on the client we build: a caller-supplied client with
+                # follow_redirects=True would resolve the chain internally and replay the cookie.
+                follow_redirects=False,
+                # timeout was accepted and silently dropped, so a caller supplying their own
+                # client got no timeout at all. Passing it through fixes that.
+                **({"timeout": timeout} if timeout is not None else {}),
+            )
+            if response.status_code not in (301, 302, 303, 307, 308):
+                return response
+            location = response.headers.get("Location")
+            if not location:
+                return response
+            url = urljoin(url, location)
+            if urlsplit(url)[:2] != origin:
+                # What urllib3 and browsers do: a credential scoped to one origin must not
+                # follow a redirect to another. The first version of this loop leaked it.
+                headers = {k: v for k, v in headers.items() if k.lower() not in _PER_ORIGIN}
+                origin = urlsplit(url)[:2]
+            if response.status_code == 303 or (response.status_code in (301, 302) and method == "POST"):
+                method, body = "GET", None
+                headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
+        raise TransportError(f"exceeded {MAX_REDIRECTS} redirects")
+
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
 
 
-class AdaptiveRateLimit:
-    """Wraps a transport and discovers the endpoint's rate limit instead of being told it.
 
-    Google publishes no limit for this endpoint, sends no Retry-After, and enforces it per
-    IP in a way that depends on that address's recent history -- the same pacing that ran
-    96 requests clean on one exit throttled after ~20 on another. So a configured interval
-    is a guess that is wrong somewhere.
 
-    This is additive-increase / multiplicative-decrease, the control law TCP uses, applied to
-    the REQUEST RATE rather than to the delay. On a 429 the rate is halved; after a run of
-    successes it gains a fixed increment. Working in rate space matters: additively shrinking
-    the *delay* instead sounds equivalent and is not, because delay is the reciprocal of rate.
-    Recovering a 32s gap back to 2s takes ~47 requests in rate space against ~600 by
-    subtracting a fixed step from the delay, which is indistinguishable from never recovering.
+_default_transport: "Urllib3Transport | None" = None
+_default_lock = threading.Lock()
 
-    Share ONE instance across every decoder in a process. The budget belongs to the IP, so a
-    per-instance limiter divides attention without dividing the load.
+
+def default_transport() -> "Urllib3Transport":
+    """The process-wide default, shared so connections are reused across `decode()` calls.
+
+    Constructing a transport per call gives a PoolManager per call and therefore a connection
+    per call -- measured 20 connections for 20 decodes, against 1 when shared. The throttle
+    counts connections, so that is the difference between running and being refused.
     """
-
-    def __init__(
-        self,
-        inner,
-        initial: float = 2.0,
-        floor: float = 0.25,
-        ceiling: float = 120.0,
-        backoff: float = 2.0,  # rate is divided by this on a 429
-        probe: float = 0.05,   # requests/sec added per success run (additive increase)
-        success_run: int = 5,
-        retries: int = 6,
-        sleep=None,
-        observer=None,
-    ):
-        import threading
-
-        self.inner = inner
-        self.gap = initial
-        self.floor, self.ceiling = floor, ceiling
-        self.backoff, self.probe = backoff, probe
-        self.success_run, self.retries = success_run, retries
-        self._sleep = sleep or __import__("time").sleep
-        self._observer = observer
-        self._streak = 0
-        self._lock = threading.Lock()
-
-    def __call__(self, request: Request, *, timeout: float | None = None, proxy: str | None = None) -> str:
-        import random
-
-        for attempt in range(self.retries):
-            with self._lock:
-                gap = self.gap
-            self._sleep(gap * (1 + random.random() * 0.1))  # jitter, so parallel callers desynchronise
-            try:
-                body = self.inner(request, timeout=timeout, proxy=proxy)
-            except TransportError as e:
-                if e.status != 429:
-                    raise
-                with self._lock:
-                    rate = (1.0 / self.gap) / self.backoff        # multiplicative decrease
-                    self.gap = min(1.0 / rate, self.ceiling)
-                    self._streak = 0
-                    widened = self.gap
-                if self._observer:
-                    self._observer(attempt, widened, "429")
-                if attempt == self.retries - 1:
-                    raise
-                continue
-            with self._lock:
-                self._streak += 1
-                if self._streak >= self.success_run:
-                    self.gap = max(self.gap - self.probe, self.floor)
-                    self._streak = 0
-                narrowed = self.gap
-            if self._observer:
-                self._observer(attempt, narrowed, "ok")
-            return body
-        raise TransportError("rate limited beyond the retry budget", status=429)
-
-
-def _decompress(raw: bytes, encoding: str) -> bytes:
-    """Decompress within a size bound, reporting failures as TransportError.
-
-    Both parts matter. Unbounded, a small body can expand until the process dies. And a
-    body whose declared encoding does not match its content raises BadGzipFile, zlib.error
-    or EOFError -- none of which a caller catching TransportError would see, so a malformed
-    response would escape as an unrelated exception and take a whole batch with it.
-    """
-    import gzip
-    import zlib
-
-    if not encoding:
-        return raw
-    try:
-        if encoding == "gzip":
-            with gzip.GzipFile(fileobj=__import__("io").BytesIO(raw)) as f:
-                out = f.read(MAX_RESPONSE_BYTES + 1)
-        elif encoding == "deflate":
-            try:  # servers disagree on whether "deflate" means zlib-wrapped or raw
-                obj = zlib.decompressobj()
-                out = obj.decompress(raw, MAX_RESPONSE_BYTES + 1)
-            except zlib.error:
-                obj = zlib.decompressobj(-zlib.MAX_WBITS)
-                out = obj.decompress(raw, MAX_RESPONSE_BYTES + 1)
-        else:
-            # An encoding we do not implement. Returning the raw bytes would surface later as
-            # a confusing "no data attributes" parse failure rather than as what it is.
-            raise TransportError(f"unsupported Content-Encoding: {encoding}")
-    except TransportError:
-        raise
-    except Exception as e:
-        raise TransportError(f"could not decode {encoding} response: {e}") from e
-    if len(out) > MAX_RESPONSE_BYTES:
-        raise TransportError(f"response exceeded {MAX_RESPONSE_BYTES} bytes decompressed")
-    return out
+    global _default_transport
+    with _default_lock:
+        if _default_transport is None:
+            _default_transport = Urllib3Transport()
+        return _default_transport

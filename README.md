@@ -65,9 +65,9 @@ Use a different HTTP client — anything callable that takes a request and retur
 
 ```python
 from googlenewsdecoder import decode
-from googlenewsdecoder.transports import UrllibTransport
+from googlenewsdecoder.transports import Urllib3Transport
 
-decode(url, transport=UrllibTransport())          # no third-party HTTP dependency
+decode(url, transport=Urllib3Transport())         # the default, stated explicitly
 decode(url, transport=my_session_backed_callable) # your pooling, retries, tracing
 ```
 
@@ -84,13 +84,18 @@ result = await decode_async(url)
 Google throttles this endpoint per IP address and publishes no limit, no `Retry-After`, and no
 rate-limit headers. Two things are worth knowing before you build on it:
 
-- The **article-page fetch** is what draws the throttling. Batching collapses the POSTs, not
-  the fetches, so it reduces round trips without reducing your exposure.
-- How much you get **depends on the address**. The same code and pacing behaves very
-  differently from a residential connection than from a datacenter or VPN address.
+- **It counts connections, not requests.** An unpooled client was refused on nine of nine
+  addresses after 65-110 TCP connections; a pooled one made 50 requests over a single
+  connection on every one and was never refused. Reuse connections, and the default transport
+  does. See `probes/connections.py`.
+- **Pacing does not raise the total**, which follows from the above.
+- How much you get **depends on the address**: residential fares several times better than
+  datacenter or VPN.
 
-`transports.AdaptiveRateLimit` wraps any transport and adjusts its own pacing in response to
-429s, rather than asking you to guess a number that would be wrong on a different host.
+So this package ships no rate limiter: adapting the rate cannot buy more of a fixed budget.
+On a 429 you usually want to stand down for the rest of the batch. A transport is a plain
+callable, so pacing, retries and standing down are all wrappers — the `transports` module
+docstring carries `with_retries` and `stop_on_429` as copyable examples, not as exports.
 
 ## Proxies
 
@@ -99,8 +104,8 @@ decode(url, proxy="http://user:pass@host:port")
 decode(url, proxy="socks5://user:pass@host:port")   # needs the [socks] extra
 ```
 
-SOCKS goes through `requests` and PySocks. `UrllibTransport` refuses a SOCKS proxy outright
-rather than quietly sending traffic direct, because urllib has no SOCKS support.
+SOCKS goes through `urllib3.contrib.socks` and PySocks, the same path `requests` uses.
+Environment `HTTP_PROXY`/`NO_PROXY` are not consulted: pass `proxy=` explicitly.
 
 ## Migrating from 0.1.x
 

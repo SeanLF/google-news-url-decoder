@@ -17,9 +17,9 @@ none of this package's HTTP code. That is checked in CI; see `.importlinter`.
 Bring your own HTTP client by passing anything callable::
 
     from googlenewsdecoder import decode
-    from googlenewsdecoder.transports import UrllibTransport
+    from googlenewsdecoder.transports import Urllib3Transport
 
-    decode(url, transport=UrllibTransport())            # no third-party dependency
+    decode(url, transport=Urllib3Transport())           # the default, stated explicitly
     decode(url, transport=my_session_backed_callable)   # your pooling, retries, tracing
 
 Because a transport is just a callable, rate limiting, caching, retries and tracing are
@@ -39,7 +39,7 @@ from .errors import TransportError
 from .flow import decode_batch_flow, decode_flow, drive, drive_async
 from .limits import DEFAULT_TIMEOUT
 from .protocol import Request
-from .transports import RequestsTransport, Transport, UrllibTransport
+from .transports import RequestsTransport, Transport, Urllib3Transport, default_transport
 
 
 def decode(source_url: str, *, transport=None, proxy: str | None = None, interval: int | None = None) -> dict:
@@ -82,7 +82,7 @@ def decode_batch(source_urls, *, transport=None, proxy: str | None = None, chunk
     try:
         return drive(
             decode_batch_flow(source_urls, chunk_size=chunk_size),
-            transport or RequestsTransport(),
+            transport or default_transport(),
             timeout=DEFAULT_TIMEOUT,
             proxy=proxy,
         )
@@ -146,7 +146,7 @@ __all__ = [
     "Transport",
     "TransportError",
     "RequestsTransport",
-    "UrllibTransport",
+    "Urllib3Transport",
     "Request",
     # drive the algorithm yourself
     "decode_flow",

@@ -9,7 +9,7 @@ import time
 from . import protocol
 from .flow import decode_flow, drive
 from .limits import DEFAULT_TIMEOUT, MAX_TOKEN_LENGTH, clamp_interval
-from .transports import RequestsTransport
+from .transports import default_transport
 
 
 class GoogleDecoder:
@@ -20,11 +20,11 @@ class GoogleDecoder:
             transport (callable, optional): How requests are sent -- any callable taking
                 (Request, timeout=, proxy=) and returning the response text. Defaults to
                 RequestsTransport, which is what this package has always used. Pass
-                UrllibTransport() to drop the `requests` dependency, or your own callable
+                Urllib3Transport() explicitly, or your own callable
                 for pooling, retries or tracing. See `transports`.
         """
         self.proxy = proxy
-        self.transport = transport or RequestsTransport()
+        self.transport = transport or default_transport()
 
     def get_base64_str(self, source_url: str) -> dict:
         """The article token from a Google News URL."""

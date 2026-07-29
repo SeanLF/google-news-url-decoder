@@ -171,33 +171,36 @@ class TestEveryRequestIsTimed:
         assert recording.calls, "no request was made"
         assert all(c["timeout"] == DEFAULT_TIMEOUT for c in recording.calls)
 
-    def test_the_default_transport_is_requests(self):
-        # requests is the default deliberately: it bounds decompression (urllib3 >=2.7),
-        # normalises content-encoding failures, and lets an explicit proxy beat NO_PROXY.
-        # UrllibTransport exists for callers who cannot take a dependency and accept less.
-        from googlenewsdecoder.transports import RequestsTransport
+    def test_the_default_transport_is_urllib3_backed(self):
+        # urllib3 rather than a hand-rolled loop: it implements no cookies at all, which this
+        # decode requires, and strips credentials cross-origin, which the loop did not.
+        from googlenewsdecoder.transports import Urllib3Transport
 
-        assert isinstance(GoogleDecoder().transport, RequestsTransport)
+        assert isinstance(GoogleDecoder().transport, Urllib3Transport)
 
+    def test_the_old_name_still_imports(self):
+        from googlenewsdecoder.transports import RequestsTransport, Urllib3Transport
+
+        assert RequestsTransport is Urllib3Transport
 
 
 class TestSocksProxies:
-    """requests handles socks via PySocks; urllib cannot, and must say so."""
+    """SOCKS goes through urllib3.contrib.socks and PySocks, the same path requests used."""
 
-    def test_urllib_transport_refuses_a_socks_proxy_clearly(self):
-        from googlenewsdecoder.protocol import params_request
-        from googlenewsdecoder.transports import TransportError, UrllibTransport
+    def test_a_socks_proxy_without_pysocks_names_the_extra(self, monkeypatch):
+        import builtins
 
-        with pytest.raises(TransportError, match="SOCKS"):
-            UrllibTransport()(params_request("https://news.google.com/articles/T"), proxy="socks5://127.0.0.1:9050")
+        from googlenewsdecoder.transports import TransportError, Urllib3Transport
 
-    def test_it_does_not_quietly_treat_socks_as_an_http_proxy(self):
-        # urllib's ProxyHandler would connect to the host and speak HTTP at it, failing with
-        # "connection reset" -- a confusing error for a proxy that is simply unsupported.
-        from googlenewsdecoder.protocol import params_request
-        from googlenewsdecoder.transports import TransportError, UrllibTransport
+        real_import = builtins.__import__
 
-        try:
-            UrllibTransport()(params_request("https://news.google.com/articles/T"), proxy="socks5h://127.0.0.1:9050")
-        except TransportError as e:
-            assert "SOCKS" in str(e) and "reset" not in str(e)
+        def no_socks(name, *a, **kw):
+            if name == "urllib3.contrib.socks":
+                raise ImportError("No module named 'socks'")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", no_socks)
+        with pytest.raises(TransportError, match="PySocks"):
+            Urllib3Transport()._pool("socks5://127.0.0.1:9050")
+
+

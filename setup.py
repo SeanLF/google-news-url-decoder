@@ -31,9 +31,9 @@ setup(
     #                 proxy semantics (an explicit proxy beats NO_PROXY), SOCKS via the extra
     #   selectolax -- a real HTML parser. A regex agreed with it on 12 live pages and is still
     #                 defeated by an HTML comment, which is a worse failure than the one it fixed.
-    install_requires=["requests>=2.32.3", "selectolax>=0.3.27"],
+    install_requires=["urllib3>=2.7.0", "selectolax>=0.3.27"],
     extras_require={
-        "socks": ["pysocks>=1.7.1"],   # socks5:// proxies, through requests
+        "socks": ["pysocks>=1.7.1"],   # socks5:// proxies, via urllib3.contrib.socks
         "async": ["httpx>=0.28.1"],    # GoogleDecoderAsync / decode_async
         "all": ["pysocks>=1.7.1", "httpx>=0.28.1"],
     },
