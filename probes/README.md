@@ -31,6 +31,18 @@ Each prints one JSON line. `_common.py` holds the shared HTTP helpers and `dedup
 every token list through that, since a repeated token costs the same as a new one and tells you
 nothing you did not already learn.
 
+## Running one across VPN exits
+
+Throttling is per address, so the interesting runs are the ones that hold everything constant
+except the exit. `entrypoint.sh` is the in-container half of that: it brings up the tunnel,
+refuses to continue unless egress actually changed, and then runs `$PROBE`. The driver that
+calls it — building the image, mounting one exit's config, fanning out across exits — is **not
+in this repo**, because it carries VPN credentials. It lives in a gitignored directory outside
+the tree, and it mounts this directory into the container, so these files are what runs.
+
+That means a docstring here saying `./probe <exit> <probe>` refers to that out-of-tree driver.
+A fresh clone can run the probes directly, as above, from whatever connection it happens to have.
+
 ## What to expect
 
 **Throttling varies enormously by address, so measure your own.** Across one wall-clock window
