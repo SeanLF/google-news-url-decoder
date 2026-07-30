@@ -141,7 +141,12 @@ and no rate-limit headers. Three things measured, in case they save you the expe
   after 19-63 article GETs, unpooled.
 - **Only the article-page GET counts.** Batching collapses the POSTs, so it saves round trips
   without reducing exposure.
-- **What the budget is counted in is not settled, but exhaustion belongs to the address.** Pooled
+- **The unit of the budget is unresolved, and probably not resolvable with shared VPN addresses.**
+  Refusal has landed anywhere from 29 article fetches to not at all in 1000, and the spread looks
+  structured by address rather than random, so it swamps the 2x effect that would distinguish
+  counting requests from counting fetches. Two designs failed to separate them. Treat this
+  library's round-trip savings as bandwidth and latency wins, which are measured, and not as
+  headroom. What IS settled: exhaustion belongs to the address. Pooled
   and unpooled clients issue the same requests per article fetch, and unpooled is refused far
   sooner, so connections cost something. Yet a pooled client on an address an unpooled one had
   just exhausted was refused 12 of 12, so pooling delays exhaustion rather than exempting you

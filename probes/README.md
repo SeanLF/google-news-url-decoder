@@ -121,6 +121,35 @@ rested, since Proton recycles them and this harness had used all three earlier t
 Whether REQUESTS cost anything on their own is therefore still open, and probably not answerable
 without addresses whose history you control.
 
+## What this harness cannot measure
+
+Worth knowing before designing a run, because two days of arms went into finding out.
+
+**Per-address variance is larger than any effect we have tried to detect.** Refusal has landed
+anywhere from 29 article fetches to not at all in 1000. Within a single stratum it is 4x; overall
+better than 20x. It also looks structured rather than random: small-country exits refused at 48-189
+fetches while Germany, the UK and South Africa ran 900-1000 fetches and 2000-3400 round trips
+without a 429. So an arm's result says as much about which address it drew as about what it did.
+
+**Which means a 2x effect needs roughly 16 arms per stratum, and the stratum is not ours to
+choose.** Whether an address is walled -- and therefore whether a fetch costs 2 hops or 4 -- is
+Google's decision, discovered after the tunnel is up. Balanced strata mean 40-50 arms.
+
+**Roughly a third to a half of arms die of infrastructure.** Five consecutive failures ends a run,
+and the errors are `MaxRetryError`, `TimeoutError`, `URLError` -- the tunnel or the exit, not the
+endpoint. A run of 14 `request_cost` arms produced zero clean refusals: they stalled, or they
+exhausted the token supply first.
+
+**So the unit of the budget is unresolved.** Whether it counts requests or article fetches decides
+whether this library's round-trip savings buy headroom or only latency. Tested two ways and neither
+settled it: arms differing in round trips per fetch (blurred by the wall appearing mid-run), and a
+post-hoc check of which quantity refusal clusters in across refused arms, where the coefficient of
+variation came out 0.45 for fetches against 0.49 for round trips. The second weakly favours
+requests. Both are swamped by the variance above.
+
+The savings are justified on bandwidth and latency, which are measured and stable. Do not claim
+they buy budget.
+
 Token age is not a factor: tokens collected weeks earlier still decode.
 
 **The interstitial is earned by replaying Google's own cookie.** From a walled address:
