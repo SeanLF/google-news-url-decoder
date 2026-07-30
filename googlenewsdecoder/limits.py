@@ -21,6 +21,25 @@ MAX_TOKEN_LENGTH = 8192
 MAX_INTERVAL = 3600
 
 
+def check_timeout(timeout):
+    """A timeout the public API will accept: a positive number, and never None.
+
+    None reaches the two transports meaning different things -- urllib3 treats it as unbounded,
+    while httpx falls back to its own 5s default -- so the same call would hang forever on one and
+    give up in five seconds on the other. Rather than reconcile that, the entry points refuse it:
+    an unbounded request is the failure DEFAULT_TIMEOUT exists to prevent, so there is no value in
+    offering it. `Transport` implementations still take `timeout=None` to mean "you decide".
+
+    Rejected here rather than left to the transport, where it arrives as a per-URL "request error"
+    that reads like Google's fault, after both candidate GETs have already been spent.
+    """
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError(f"timeout must be a positive number of seconds, got {timeout!r}")
+    if timeout <= 0:
+        raise ValueError(f"timeout must be greater than zero, got {timeout!r}")
+    return timeout
+
+
 def clamp_interval(interval):
     """Bound a sleep interval to MAX_INTERVAL, leaving anything else untouched.
 

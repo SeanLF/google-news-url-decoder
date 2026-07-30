@@ -37,12 +37,19 @@ from .decoder import GoogleDecoder
 from .decoder_async import GoogleDecoderAsync
 from .errors import TransportError
 from .flow import decode_batch_flow, decode_flow, drive, drive_async
-from .limits import DEFAULT_TIMEOUT
+from .limits import DEFAULT_TIMEOUT, check_timeout
 from .protocol import Request
 from .transports import RequestsTransport, Transport, Urllib3Transport, default_transport
 
 
-def decode(source_url: str, *, transport=None, proxy: str | None = None, interval: int | None = None) -> dict:
+def decode(
+    source_url: str,
+    *,
+    transport=None,
+    proxy: str | None = None,
+    interval: int | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> dict:
     """Decode one Google News URL.
 
     Parameters:
@@ -52,15 +59,27 @@ def decode(source_url: str, *, transport=None, proxy: str | None = None, interva
         proxy:      Proxy for all requests.
         interval:   Seconds to wait after decoding, to pace a batch. Clamped to
                     `limits.MAX_INTERVAL` (3600s).
+        timeout:    Seconds per attempt, connect and read. Not per decode: a decode follows
+                    redirects and retries a failed connect once per hop.
 
     Returns:
-        {"status": True, "decoded_url": ...} or {"status": False, "message": ...}
+        {"status": True, "decoded_url": ...}, or on failure
+        {"status": False, "message": ..., "http_status": 429} where `http_status` is present
+        only when the failure carried one. Branch on that rather than on the message: it is
+        what lets a batch stand down on a refusal without wrapping a transport.
     """
-    return GoogleDecoder(proxy=proxy, transport=transport).decode_google_news_url(source_url, interval=interval)
+    return GoogleDecoder(proxy=proxy, transport=transport).decode_google_news_url(
+        source_url, interval=interval, timeout=timeout
+    )
 
 
 async def decode_async(
-    source_url: str, *, transport=None, proxy: str | None = None, interval: int | None = None
+    source_url: str,
+    *,
+    transport=None,
+    proxy: str | None = None,
+    interval: int | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict:
     """Decode one Google News URL asynchronously. Needs httpx unless you pass a transport.
 
@@ -79,12 +98,19 @@ async def decode_async(
     """
     decoder = GoogleDecoderAsync(proxy=proxy, transport=transport)
     try:
-        return await decoder.decode_google_news_url(source_url, interval=interval)
+        return await decoder.decode_google_news_url(source_url, interval=interval, timeout=timeout)
     finally:
         await decoder.close()
 
 
-def decode_batch(source_urls, *, transport=None, proxy: str | None = None, chunk_size: int = 50) -> list:
+def decode_batch(
+    source_urls,
+    *,
+    transport=None,
+    proxy: str | None = None,
+    chunk_size: int = 50,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> list:
     """Decode many Google News URLs, sharing one POST per chunk.
 
     Costs one signature fetch per URL plus one POST per `chunk_size` URLs, rather than two
@@ -94,12 +120,13 @@ def decode_batch(source_urls, *, transport=None, proxy: str | None = None, chunk
     """
     if not isinstance(chunk_size, int) or chunk_size < 1:
         raise ValueError(f"chunk_size must be a positive integer, got {chunk_size!r}")
+    check_timeout(timeout)
     source_urls = list(source_urls)
     try:
         return drive(
             decode_batch_flow(source_urls, chunk_size=chunk_size),
             transport or default_transport(),
-            timeout=DEFAULT_TIMEOUT,
+            timeout=timeout,
             proxy=proxy,
         )
     except Exception as e:

@@ -73,18 +73,21 @@ decode(url, transport=Urllib3Transport())         # the default, stated explicit
 decode(url, transport=my_session_backed_callable) # your pooling, retries, tracing
 ```
 
-Four things worth knowing before you rely on it:
+Some things worth knowing before you rely on it:
 
 - **Each attempt times out after 15 seconds** (`limits.DEFAULT_TIMEOUT`), applied to connect and read
-  on both transports. Note *attempt*, not decode: one decode follows redirects and retries a failed
-  connect once per hop, so its worst case is a small multiple of that, not 15 seconds.
-  `decode()` takes no `timeout=`; to change it, pass a transport that supplies its own.
+  on both transports, and `timeout=` on any entry point changes it. Note *attempt*, not decode: one
+  decode follows redirects and retries a failed connect once per hop, so its worst case is a small
+  multiple of that.
+- **A refusal is a number, not prose.** A failed result carries `http_status` when the failure had
+  one, so standing down on a 429 is `result.get("http_status") == 429`. The key is absent rather
+  than None when there was no HTTP status, so a parse failure cannot be mistaken for one.
 - **Responses are capped at 32 MiB decompressed** (`limits.MAX_RESPONSE_BYTES`), counted decoded
   because that is where a compressed bomb expands. Exceeding it raises `TransportError` rather
   than returning a truncated page, so it is one of the reasons a decode can fail.
 - **The default transport is shared process-wide,** which is what keeps every decode on one
-  pooled connection. Google's throttle is sensitive to connection count, so constructing a
-  transport per call is measurably worse. If you build your own, hold onto it. Call `close()`
+  pooled connection, saving a TLS handshake per decode. If you build your own, hold onto it
+  rather than constructing one per call. Call `close()`
   when you are done with one you own, or use it as a context manager; do not close
   `default_transport()`, since everything else in the process is using it. The async transport
   has `aclose()` and `GoogleDecoderAsync` works as an async context manager.
@@ -108,10 +111,11 @@ rate-limit headers. Two things are worth knowing before you build on it:
   total.
 - How much you get **depends on the address**: residential fares several times better than
   datacenter or VPN.
-- **Reuse connections.** Measured one arm per address on previously unused addresses: clients
-  opening a connection per request were refused 4 of 4 after 24-88 articles; pooled clients
-  were refused 1 of 5, the rest running to the end of the token supply. The default transport
-  pools and `decode()` shares one, so this is already done for you.
+- **Connection reuse does not appear to buy budget**, though it is the default anyway. Twenty
+  arms, one per address, pooled at 6-31 connections against unpooled at 104-595: refusal came at
+  a median of 96 article fetches against 86, which a permutation test puts at p = 0.22. An
+  earlier measurement suggesting otherwise had two arms sharing each address. Pool for the
+  handshakes; `decode()` already does.
 
 So this package ships no rate limiter: adapting the rate cannot buy more of a fixed budget.
 On a 429 you usually want to stand down for the rest of the batch. A transport is a plain

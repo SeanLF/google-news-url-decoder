@@ -23,28 +23,49 @@ from .errors import TransportError
 from .limits import MAX_TOKEN_LENGTH
 
 
+def failed(message: str, http_status: int | None = None) -> dict:
+    """The failure shape. `http_status` is ABSENT, not None, when the failure had no HTTP status.
+
+    Absent so that `result.get("http_status") == 429` needs no guarding and a parse failure can
+    never be read as an HTTP one. Note the two senses of "status" in the returned dict: `status`
+    is the success boolean this library has always returned, `http_status` is the response code.
+    """
+    out = {"status": False, "message": message}
+    if http_status is not None:
+        out["http_status"] = http_status
+    return out
+
+
 def _fetch_params(token: str, locale=protocol.DEFAULT_LOCALE):
-    """Yield article-page GETs until one parses; return (params, last_error).
+    """Yield article-page GETs until one parses; return (params, last_error, last_status).
 
     `yield from` passes `send()` and `throw()` straight through, so both flows drive this the
     same way and neither carries its own copy. They did, and the copies had already drifted:
     only one of them fell back to a default message, and only one carried the note below.
     """
     last_error = None
+    last_status = None
     for url in protocol.params_urls(token, locale):
         try:
             body = yield protocol.params_request(url)
         except TransportError as e:
             last_error = f"Request error in get_decoding_params: {e}"
+            last_status = e.status
             continue
         params = protocol.parse_params(body)
         if params:
-            return params, None
+            return params, None, None
         # A page that parses to nothing is the common failure. The old code returned here
         # instead of trying the next candidate, so the documented RSS fallback only ever ran
         # on a transport exception -- never on the path that needed it.
-        last_error = "Failed to fetch data attributes from Google News with the articles URL."
-    return None, last_error or "Failed to fetch data attributes from Google News."
+        # A page that parsed to nothing is not a refusal, and reporting an earlier attempt's 429
+        # alongside this message would describe two different requests as one. But a refusal is
+        # the more actionable of the two, and on a partly-throttled address the orderings do
+        # happen: first candidate 429s, second serves an interstitial that parses to nothing. So
+        # a refusal already recorded wins, and the pair stays consistent because neither moves.
+        if last_status is None:
+            last_error = "Failed to fetch data attributes from Google News with the articles URL."
+    return None, last_error or "Failed to fetch data attributes from Google News.", last_status
 
 
 def decode_flow(
@@ -76,18 +97,18 @@ def decode_flow(
     # current feeds finds essentially only opaque handles, so the fast path would almost never
     # fire. `protocol.embedded_url` remains available for callers who want to make that
     # decision themselves; the library does not make it for them.
-    params, last_error = yield from _fetch_params(token, locale)
+    params, last_error, last_status = yield from _fetch_params(token, locale)
     if not params:
-        return {"status": False, "message": last_error}
+        return failed(last_error, last_status)
 
     try:
         body = yield protocol.decode_request(token, *params)
     except TransportError as e:
-        return {"status": False, "message": f"Request error in decode_url: {e}"}
+        return failed(f"Request error in decode_url: {e}", e.status)
 
     decoded = protocol.parse_decoded(body)
     if decoded is None:
-        return {"status": False, "message": "Parsing error in decode_url: no decoded url in response"}
+        return failed("Parsing error in decode_url: no decoded url in response")
     return {"status": True, "decoded_url": decoded}
 
 
@@ -164,9 +185,9 @@ def decode_batch_flow(
             results[position] = {"status": False, "message": "Invalid Google News URL format."}
             continue
         # See decode_flow on why this does not short-circuit on an inline URL.
-        params, last_error = yield from _fetch_params(token, locale)
+        params, last_error, last_status = yield from _fetch_params(token, locale)
         if not params:
-            results[position] = {"status": False, "message": last_error}
+            results[position] = failed(last_error, last_status)
             continue
         pending.append((position, token, params[0], params[1]))
 
@@ -175,8 +196,10 @@ def decode_batch_flow(
         try:
             body = yield protocol.batch_decode_request([(t, s, ts) for _, t, s, ts in chunk])
         except TransportError as e:
+            # Every position in the chunk gets the status, because one refused POST is the whole
+            # chunk refused: a caller standing down on a 429 needs to see it on any of them.
             for position, *_ in chunk:
-                results[position] = {"status": False, "message": f"Request error in decode_url: {e}"}
+                results[position] = failed(f"Request error in decode_url: {e}", e.status)
             continue
         found = protocol.parse_batch_decoded(body)
         for tag, (position, *_) in enumerate(chunk, 1):

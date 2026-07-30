@@ -124,6 +124,13 @@ now validates what it returns: an http(s) scheme, a real host, and no control ch
   removes a round trip: measured taking a decode from three requests to two on clean exits, and a
   forced `en-US` is accepted from exits Google would have assigned otherwise. Overridable via
   `flow.decode_flow(locale=...)`; `None` restores the bare URL. A walled exit redirects anyway.
+- **`timeout=` on `decode`, `decode_async`, `decode_batch` and both decoder classes**
+  (not the deprecated `gnewsdecoder` shims), and **`http_status` on a failed result.** Both exist because
+  a consumer had to bypass the top layer to get them: `decode()` hardcoded its timeout, so the only
+  way to change it was to drive `decode_flow` by hand, and a refusal arrived as prose, so the only
+  way to branch on a 429 was to wrap a transport and catch it before the flow flattened it. Neither
+  was a reason to reach past `decode()`. `http_status` is absent rather than None when the failure
+  had no HTTP status, so a parse failure is never mistaken for one.
 - **`decode_batch(chunk_size=50)`** bounds how many decodes ride in one POST. No ceiling was found
   (400 RPCs in one 270 KB body returned 400 results); the default is low so one failed POST has a
   smaller blast radius.

@@ -8,7 +8,7 @@ import time
 
 from . import protocol
 from .flow import decode_flow, drive
-from .limits import DEFAULT_TIMEOUT, MAX_TOKEN_LENGTH, clamp_interval
+from .limits import DEFAULT_TIMEOUT, MAX_TOKEN_LENGTH, check_timeout, clamp_interval
 from .transports import default_transport
 
 
@@ -34,11 +34,18 @@ class GoogleDecoder:
             return {"status": False, "message": "Invalid Google News URL format."}
         return {"status": True, "base64_str": token}
 
-    def decode_google_news_url(self, source_url: str, interval: int | None = None) -> dict:
-        """Decode a Google News article URL into its original source URL."""
+    def decode_google_news_url(
+        self, source_url: str, interval: int | None = None, timeout: float = DEFAULT_TIMEOUT
+    ) -> dict:
+        """Decode a Google News article URL into its original source URL.
+
+        `timeout` is seconds per attempt, not per decode. Raises ValueError if it is not a
+        positive number, since the alternative is a request with no bound on it.
+        """
+        check_timeout(timeout)
         try:
             result = drive(
-                decode_flow(source_url), self.transport, timeout=DEFAULT_TIMEOUT, proxy=self.proxy
+                decode_flow(source_url), self.transport, timeout=timeout, proxy=self.proxy
             )
             if interval:
                 time.sleep(clamp_interval(interval))

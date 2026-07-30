@@ -8,7 +8,7 @@ import asyncio
 
 from . import protocol
 from .flow import decode_flow, drive_async
-from .limits import DEFAULT_TIMEOUT, MAX_TOKEN_LENGTH, clamp_interval
+from .limits import DEFAULT_TIMEOUT, MAX_TOKEN_LENGTH, check_timeout, clamp_interval
 from .transports import HttpxAsyncTransport
 
 
@@ -37,11 +37,18 @@ class GoogleDecoderAsync:
             return {"status": False, "message": "Invalid Google News URL format."}
         return {"status": True, "base64_str": token}
 
-    async def decode_google_news_url(self, source_url: str, interval: int | None = None) -> dict:
-        """Decode a Google News article URL into its original source URL."""
+    async def decode_google_news_url(
+        self, source_url: str, interval: int | None = None, timeout: float = DEFAULT_TIMEOUT
+    ) -> dict:
+        """Decode a Google News article URL into its original source URL.
+
+        `timeout` is seconds per attempt, not per decode, and must be a positive number: see
+        `limits.check_timeout` for why None is refused rather than passed through.
+        """
+        check_timeout(timeout)
         try:
             result = await drive_async(
-                decode_flow(source_url), self.transport, timeout=DEFAULT_TIMEOUT, proxy=self.proxy
+                decode_flow(source_url), self.transport, timeout=timeout, proxy=self.proxy
             )
             if interval:
                 await asyncio.sleep(clamp_interval(interval))

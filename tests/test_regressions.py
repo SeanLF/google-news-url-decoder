@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from googlenewsdecoder import decode, decode_batch, protocol
+from googlenewsdecoder import decode, decode_async, decode_batch, protocol
 from googlenewsdecoder.limits import MAX_RESPONSE_BYTES
 from googlenewsdecoder.protocol import Request
 from googlenewsdecoder.transports import TransportError
@@ -521,6 +521,134 @@ class TestTheTwoTransportsDecodeAlike:
     def test_the_sync_transport_refuses_a_gzip_stream_that_was_cut(self):
         with serving(fixed_body(CUT_GZIP, encoding="gzip")) as server, pytest.raises(TransportError):
             fetch("sync", f"http://127.0.0.1:{server.server_port}/cut")
+
+
+class TestTheTopLayerCanBeUsedWithoutBuildingATransport:
+    """Two gaps that forced every serious caller down to the sans-io seam.
+
+    A consumer of this library dropped to `drive(decode_flow(...))` for one stated reason: the
+    top layer hardcoded its timeout. And it wrapped a transport in a 429-catcher for another: a
+    refusal reached the result as prose, so there was nothing to branch on. Neither is a reason
+    to reach past `decode()`, and both were the library's fault rather than the caller's.
+    """
+
+    def test_a_caller_can_set_the_timeout(self):
+        seen = {}
+
+        class Recorder:
+            def __call__(self, request, *, timeout=None, proxy=None):
+                seen["timeout"] = timeout
+                raise TransportError("stop here")
+
+        decode(GOOGLE_URL, transport=Recorder(), timeout=42)
+        assert seen["timeout"] == 42, "timeout must reach the transport, not just the signature"
+
+    def test_the_default_timeout_still_applies_when_unset(self):
+        from googlenewsdecoder.limits import DEFAULT_TIMEOUT
+
+        seen = {}
+
+        class Recorder:
+            def __call__(self, request, *, timeout=None, proxy=None):
+                seen["timeout"] = timeout
+                raise TransportError("stop here")
+
+        decode(GOOGLE_URL, transport=Recorder())
+        assert seen["timeout"] == DEFAULT_TIMEOUT
+
+    def test_a_refusal_carries_its_status_as_a_number(self):
+        """The whole point: branch on 429 without intercepting it before the flow sees it."""
+
+        class Refuse:
+            def __call__(self, request, *, timeout=None, proxy=None):
+                raise TransportError("HTTP 429", status=429)
+
+        result = decode(GOOGLE_URL, transport=Refuse())
+        assert result["status"] is False
+        assert result["http_status"] == 429, result
+
+    @pytest.mark.parametrize("kind", ["sync", "async"])
+    def test_a_caller_can_set_the_timeout_on_either_path(self, kind):
+        """Both paths, because the two transports disagreed about what a timeout of None means and
+        only the sync one was covered."""
+        if kind == "async":
+            pytest.importorskip("httpx", reason="the async transport needs the [async] extra")
+
+        seen = {}
+
+        class Recorder:
+            def __call__(self, request, *, timeout=None, proxy=None):
+                seen["timeout"] = timeout
+                raise TransportError("stop here")
+
+        if kind == "sync":
+            decode(GOOGLE_URL, transport=Recorder(), timeout=42)
+        else:
+            asyncio.run(decode_async(GOOGLE_URL, transport=Recorder(), timeout=42))
+        assert seen["timeout"] == 42
+
+    @pytest.mark.parametrize("bad", [None, 0, -1, "5", True], ids=["none", "zero", "negative", "string", "bool"])
+    def test_an_unusable_timeout_is_refused_not_passed_down(self, bad):
+        """`None` especially. urllib3 reads it as unbounded and httpx falls back to its own 5s
+        default, so the same call would hang forever on one transport and give up quickly on the
+        other. Refused here rather than surfacing later as a per-URL "request error" that reads
+        like Google's fault, after both candidate GETs have been spent.
+        """
+        with pytest.raises(ValueError, match="timeout"):
+            decode(GOOGLE_URL, timeout=bad)
+        with pytest.raises(ValueError, match="timeout"):
+            decode_batch([GOOGLE_URL], timeout=bad)
+
+    def test_a_failure_with_no_status_omits_the_key(self):
+        """Absent rather than None, so `.get("http_status") == 429` needs no guarding, and a
+        parse failure is never mistaken for an HTTP one."""
+
+        class Empty:
+            def __call__(self, request, *, timeout=None, proxy=None):
+                return "<html>nothing to parse</html>"
+
+        result = decode(GOOGLE_URL, transport=Empty())
+        assert result["status"] is False
+        assert "http_status" not in result, result
+        # Asserted so this cannot quietly start testing a different failure: without it, a change
+        # to token validation would fail earlier and leave the test green while measuring nothing.
+        assert "data attributes" in result["message"], result
+
+    def test_a_refusal_survives_a_later_candidate_that_merely_parses_to_nothing(self):
+        """The ordering a partly-throttled address produces, and the one nothing covered.
+
+        `params_urls` offers two candidates. If the first is refused and the second returns an
+        interstitial that parses to nothing, the caller standing down on 429 must still see it --
+        otherwise the more actionable of the two failures is the one thrown away. Deleting the
+        guard that keeps it left the whole suite green.
+        """
+        calls = {"n": 0}
+
+        class RefuseThenBlank:
+            def __call__(self, request, *, timeout=None, proxy=None):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise TransportError("HTTP 429", status=429)
+                return "<html>nothing to parse</html>"
+
+        result = decode(GOOGLE_URL, transport=RefuseThenBlank())
+        assert calls["n"] == 2, "the second candidate should still have been tried"
+        assert result["status"] is False
+        assert result.get("http_status") == 429, result
+
+    def test_a_batch_reports_the_status_on_every_position_in_a_refused_chunk(self):
+        """One refused POST is the whole chunk refused, so a caller standing down on a 429 must
+        see it whichever position they look at."""
+
+        class RefuseThePost:
+            def __call__(self, request, *, timeout=None, proxy=None):
+                if request.method == "POST":
+                    raise TransportError("HTTP 429", status=429)
+                return '<div data-n-a-sg="sig" data-n-a-ts="123"></div>'
+
+        results = decode_batch([GOOGLE_URL] * 3, transport=RefuseThePost())
+        assert len(results) == 3
+        assert all(r.get("http_status") == 429 for r in results), results
 
 
 class TestOnlyAFailedConnectIsRetried:
