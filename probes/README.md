@@ -1,7 +1,7 @@
 # Probes
 
 Scripts for measuring how Google actually behaves, since it documents none of it. **Not tests,
-and not shipped** — every one makes real requests, and `MANIFEST.in` and `setup.py` keep this
+and not shipped** -- every one makes real requests, and `MANIFEST.in` and `setup.py` keep this
 directory out of the sdist and the wheel.
 
 | probe | question |
@@ -17,6 +17,8 @@ directory out of the sdist and the wheel.
 | `hook_vs_loop.py` | Can a response hook replace the redirect loop? |
 | `prior_art.py` | Do urllib3 and the published consent-cookie techniques work? |
 | `budget.py` | What does one decode cost, and how many do you get? |
+| `locale_params.py` | Does sending the locale up front skip Google's redirect? |
+| `pooled_vs_fresh.py` | Is a pooled client still served on an address that just refused an unpooled one? |
 | `async_transport.py` | Does the async transport carry the consent bug? |
 | `decode_with.py` | Does a given installed version actually decode today? |
 | `fetch_tokens.py` | Get live tokens to feed the others. |
@@ -27,7 +29,7 @@ python probes/fetch_tokens.py 6 tokens.txt
 PYTHONPATH=. python probes/decode_with.py checkout tokens.txt
 ```
 
-Each prints one JSON line. `_common.py` holds the shared HTTP helpers and `dedupe()` — feed
+Each prints one JSON line. `_common.py` holds the shared HTTP helpers and `dedupe()` -- feed
 every token list through that, since a repeated token costs the same as a new one and tells you
 nothing you did not already learn.
 
@@ -43,9 +45,9 @@ probes/runner/probe latvia walled SERVER_HOSTNAMES=node-lv-01.protonvpn.net
 probes/runner/parallel budget LIMIT=60
 ```
 
-`entrypoint.sh` is the in-container half: it confirms which address we are actually leaving from
+`probes/entrypoint.sh` is the in-container half: it confirms which address we are leaving from
 and refuses to run otherwise. Setup, credentials for either protocol, and the one trap worth
-knowing — `parallel` holds wall-clock constant, not the per-address budget — are in
+knowing -- `parallel` holds wall-clock constant, not the per-address budget -- are in
 [docs/probe-harness.md](../docs/probe-harness.md).
 
 ## What has been ruled out
@@ -60,7 +62,7 @@ so nobody derives them again:
 | novelty of distinct articles | 5 repeated articles throttled at 30, 4,331 distinct ones at 33 |
 
 Those measurements came from a laptop VPN session, one exit at a time, and ranged from 30 requests
-to 96+ under nominally identical conditions — a wider spread than any variable being manipulated,
+to 96+ under nominally identical conditions -- a wider spread than any variable being manipulated,
 which is what motivated rotating exits automatically rather than trusting any single run.
 
 ## What to expect

@@ -27,8 +27,11 @@ setup(
     # becomes part of what users install. `probes/` in particular is a live-network lab.
     packages=find_packages(include=["googlenewsdecoder", "googlenewsdecoder.*"]),
     # Two dependencies, each earning its place against a defect found by adversarial review:
-    #   requests   -- transparent + bounded decompression, normalised content-encoding errors,
-    #                 proxy semantics (an explicit proxy beats NO_PROXY), SOCKS via the extra
+    #   urllib3    -- BOUNDED decompression, which is the one thing httpx cannot do and the
+    #                 reason it is the default: `read(amt, decode_content=True)` caps decoded
+    #                 output. Also no cookie jar at all, which is what gets past Google's
+    #                 consent wall, plus cross-origin credential stripping and SOCKS via the
+    #                 extra. `requests` used to be here and is no longer a dependency.
     #   selectolax -- a real HTML parser. A regex agreed with it on 12 live pages and is still
     #                 defeated by an HTML comment, which is a worse failure than the one it fixed.
     install_requires=["urllib3>=2.7.0", "selectolax>=0.3.27"],

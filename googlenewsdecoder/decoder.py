@@ -18,10 +18,11 @@ class GoogleDecoder:
         Parameters:
             proxy (str, optional): Proxy for all requests. http(s):// or socks5://.
             transport (callable, optional): How requests are sent -- any callable taking
-                (Request, timeout=, proxy=) and returning the response text. Defaults to
-                RequestsTransport, which is what this package has always used. Pass
-                Urllib3Transport() explicitly, or your own callable
-                for pooling, retries or tracing. See `transports`.
+                (Request, timeout=, proxy=) and raising TransportError on failure. Defaults
+                to `default_transport()`, shared process-wide so every decode reuses one
+                pooled connection; constructing your own per decoder gives a connection per
+                decoder instead. Pass your own callable for retries, caching or tracing.
+                See `transports`.
         """
         self.proxy = proxy
         self.transport = transport or default_transport()

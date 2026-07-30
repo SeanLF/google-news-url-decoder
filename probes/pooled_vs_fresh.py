@@ -1,16 +1,27 @@
 """Is the budget counted per REQUEST, or per CONNECTION?
 
-`degrade.py` (urllib, a fresh connection per GET) is refused at ~28 requests. A pooled
-urllib3 run through the library made 15,256 article GETs across nine exits without a single
-429. Same endpoint, same day, three orders of magnitude apart. The one thing that differs is
-connection reuse.
+Still the open question, and this is the cheapest way at it. `connections.py` measures how far
+each kind of client gets, which cannot separate the two: in every run so far requests and
+connections rose together, so a refusal is consistent with either being the thing counted.
 
-If the throttle counts connections, a pooled client should still be served on an address that
-has just refused an unpooled one -- which is the state every exit is in immediately after
-`degrade`. That makes this a decisive test rather than a slow one, and it costs a handful of
-requests.
+This asks a binary question instead. If the throttle counts connections, a pooled client should
+still be served on an address that has just refused an unpooled one, which is the state an exit is
+in immediately after `degrade.py`. Served means the counter is not simply per request; refused
+means it is, or that something else is.
 
-Run it straight after degrade.py on the same exit.
+Running on a spent address is therefore the design, NOT the shared-budget confound that
+`connections.py` and `docs/probe-harness.md` warn about. That warning is about comparing how long
+two arms survive on one address, where the second inherits the remains. Here the answer is
+yes-or-no on the first few requests, and a spent address is the precondition.
+
+    ./probes/runner/probe <exit> degrade
+    ./probes/runner/probe <exit> pooled_vs_fresh    # same exit, straight after
+
+Earlier versions of this docstring cited "15,256 article GETs across nine exits without a single
+429" against ~28 for the unpooled arm. That figure is retracted: it dates from a period when the
+request envelope was malformed, which `_common.fresh_tokens` documents, and nothing has reproduced
+it. Do not quote it. The largest reproduced pooled figure is roughly 660 round trips on one
+connection, and that run ended in a stall rather than a refusal.
 """
 
 import os

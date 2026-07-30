@@ -7,7 +7,7 @@ back into the publisher URLs they stand for.
 
 That matters if you are aggregating news, deduplicating stories across sources, or showing
 readers where a link actually goes before they click it. Google publishes no API for this, so
-the work is a signature scrape followed by a call to an internal RPC — fiddly enough that it
+the work is a signature scrape followed by a call to an internal RPC -- fiddly enough that it
 is worth having in one place rather than in every project that needs it.
 
 ## What you get
@@ -16,10 +16,11 @@ is worth having in one place rather than in every project that needs it.
   in the order you asked for them, which is not free: the endpoint answers a batch in an
   arbitrary order (measured returning tags `2, 4, 1, 3, 5` for a five-item batch), so anything
   pairing request order with response order hands each article another article's URL.
-- **Bring your own HTTP client.** A transport is any callable. `requests` is the default;
-  `urllib` ships as a zero-dependency option, `httpx` powers the async API, and your own
-  session, retry policy, rate limiter or tracing wrapper drops straight in.
-- **A protocol layer with no I/O in it.** `protocol` is pure functions over strings — what to
+- **Bring your own HTTP client.** A transport is any callable taking
+  `(Request, timeout=, proxy=)` and raising `TransportError` on failure. `urllib3` is the
+  default and the only hard dependency, `httpx` powers the async API from the `[async]` extra,
+  and your own session, retry policy, rate limiter or tracing wrapper drops straight in.
+- **A protocol layer with no I/O in it.** `protocol` is pure functions over strings -- what to
   send and what a response means, importing nothing outside the standard library. Drive it
   yourself if you would rather own the networking entirely.
 - **Sync and async share one implementation.** The algorithm lives in `flow` as a generator;
@@ -61,7 +62,8 @@ else:
     print("could not decode:", result["message"])
 ```
 
-Use a different HTTP client — anything callable that takes a request and returns the body:
+Use a different HTTP client. A transport is any callable taking `(Request, timeout=, proxy=)`
+that returns the body as text and raises `TransportError` on failure:
 
 ```python
 from googlenewsdecoder import decode
@@ -70,6 +72,22 @@ from googlenewsdecoder.transports import Urllib3Transport
 decode(url, transport=Urllib3Transport())         # the default, stated explicitly
 decode(url, transport=my_session_backed_callable) # your pooling, retries, tracing
 ```
+
+Four things worth knowing before you rely on it:
+
+- **Requests time out after 15 seconds** (`limits.DEFAULT_TIMEOUT`), applied to connect and read
+  on both transports. `decode()` takes no `timeout=`; to change it, pass a transport that
+  supplies its own.
+- **Responses are capped at 32 MiB decompressed** (`limits.MAX_RESPONSE_BYTES`), counted decoded
+  because that is where a compressed bomb expands. Exceeding it raises `TransportError` rather
+  than returning a truncated page, so it is one of the reasons a decode can fail.
+- **The default transport is shared process-wide,** which is what keeps every decode on one
+  pooled connection. Google's throttle is sensitive to connection count, so constructing a
+  transport per call is measurably worse. If you build your own, hold onto it. Call `close()`
+  when you are done with one you own, or use it as a context manager; do not close
+  `default_transport()`, since everything else in the process is using it. The async transport
+  has `aclose()` and `GoogleDecoderAsync` works as an async context manager.
+- **`interval` is clamped** to `limits.MAX_INTERVAL` (3600s) rather than rejected.
 
 Async, which needs the `[async]` extra:
 
@@ -96,7 +114,7 @@ rate-limit headers. Two things are worth knowing before you build on it:
 
 So this package ships no rate limiter: adapting the rate cannot buy more of a fixed budget.
 On a 429 you usually want to stand down for the rest of the batch. A transport is a plain
-callable, so pacing, retries and standing down are all wrappers — the `transports` module
+callable, so pacing, retries and standing down are all wrappers -- the `transports` module
 docstring carries `with_retries` and `stop_on_429` as copyable examples, not as exports.
 
 ## Proxies
@@ -114,7 +132,7 @@ Environment `HTTP_PROXY`/`NO_PROXY` are not consulted: pass `proxy=` explicitly.
 `gnewsdecoder` still works and still returns what it always did, so most code needs no change.
 
 The five numbered decoders are gone. They were five standalone implementations of one decode,
-four carrying their own copy of the request envelope — which is why a change at Google's end
+four carrying their own copy of the request envelope -- which is why a change at Google's end
 meant a new decoder version rather than an edit. They are not aliased, because their contracts
 disagreed with each other and a silent alias would hand you a shape you did not ask for.
 Reaching for one now raises an error naming its replacement.
@@ -140,16 +158,16 @@ Enter wherever suits you:
 |---|---|
 | `protocol` | pure functions: what to send, what a response means. No I/O. |
 | `flow` | the algorithm as a generator, plus a sync and an async driver |
-| `transports` | how bytes actually move — swappable, `requests` by default |
+| `transports` | how bytes actually move, swappable, urllib3 by default |
 | `errors` | `TransportError`, the vocabulary both sides of the seam share |
 
 `protocol`, `flow` and `errors` do not import `transports`, so you can drive the algorithm with
 your own I/O without touching this package's HTTP code at all. That is checked in CI rather
-than promised — see `.importlinter`.
+than promised -- see `.importlinter`.
 
 ## Contributing
 
-Tests run without a network — every HTTP entry point is substituted, so nothing depends on
+Tests run without a network -- every HTTP entry point is substituted, so nothing depends on
 Google being reachable or on the decode contract of the day. That is enforced rather than
 promised: `tests/conftest.py` takes the sockets away, so a test that reaches out fails naming
 itself.

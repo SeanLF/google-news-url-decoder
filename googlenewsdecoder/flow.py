@@ -6,7 +6,7 @@ bodies back. It performs no I/O of its own, so the same flow runs against `reque
 stop being two copies of one algorithm.
 
     flow = decode_flow(url)
-    result = drive(flow, RequestsTransport())          # sync
+    result = drive(flow, Urllib3Transport())           # sync
     result = await drive_async(flow, HttpxAsyncTransport())   # async
 
 The two drivers are the same thirteen lines with one `await` between them. Everything that

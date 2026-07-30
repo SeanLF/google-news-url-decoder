@@ -9,7 +9,7 @@ The package is layered, and you can enter at any level:
     errors      TransportError, the vocabulary shared across the seam
     protocol    pure functions over strings; no I/O, standard library only
     flow        the algorithm as a generator that yields requests
-    transports  how requests actually get sent -- swappable, defaults to `requests`
+    transports  how requests actually get sent -- swappable, defaults to urllib3
 
 `protocol` and `flow` do not import `transports`, so bringing your own I/O means importing
 none of this package's HTTP code. That is checked in CI; see `.importlinter`.
@@ -47,9 +47,11 @@ def decode(source_url: str, *, transport=None, proxy: str | None = None, interva
 
     Parameters:
         source_url: The Google News article URL.
-        transport:  How to send requests. Defaults to `requests`.
+        transport:  How to send requests. Defaults to the shared urllib3 transport, which is
+                    what keeps every decode in the process on one pooled connection.
         proxy:      Proxy for all requests.
-        interval:   Seconds to wait after decoding, to pace a batch.
+        interval:   Seconds to wait after decoding, to pace a batch. Clamped to
+                    `limits.MAX_INTERVAL` (3600s).
 
     Returns:
         {"status": True, "decoded_url": ...} or {"status": False, "message": ...}

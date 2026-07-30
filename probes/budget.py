@@ -77,7 +77,7 @@ def _install_counter():
     budget is actually spent in. requests yields one per logical fetch: `HTTPAdapter.send` calls
     `urlopen` on the connection pool, never on the PoolManager, and its redirects go back through
     `Session.send` rather than `Session.request`. So a ratio from one seam must not be compared
-    with a ratio from the other -- including across builds via `./build <checkout>`.
+    with a ratio from the other, including across two different builds of the library.
 
     One blind spot either way: a pool-level retry recurses inside `HTTPConnectionPool.urlopen`
     and is invisible here. The transport sets every Retry count to 0, so nothing retries today.

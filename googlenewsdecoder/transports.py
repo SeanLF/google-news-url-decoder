@@ -250,7 +250,7 @@ def _close_manager(manager) -> None:
 
 class Urllib3Transport(_HeaderMixin):
     """The default. Redirect resolution, connection pooling and decompression come from
-    urllib3, which requests already depends on.
+    urllib3, which is what `requests` uses underneath. This package depends on it directly.
 
     urllib3 implements no cookie support at all -- its pools are connection pools, not
     stateful clients -- which is the property this decode needs: Google's consent endpoint
