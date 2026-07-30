@@ -24,10 +24,22 @@ A `Request` says what to send without saying how to send it.
 import base64
 import json
 import re
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import NamedTuple
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 BATCHEXECUTE_URL = "https://news.google.com/_/DotsSplashUi/data/batchexecute"
+
+# Sent on the article-page GET so Google does not spend a redirect adding it. Need not match the
+# egress geography, and only the signature and timestamp are read off that page, so the page's
+# language never reaches the result.
+#
+# Read-only because the three signatures below capture this object at definition time: rebinding
+# the name would silently do nothing, while mutating it in place would silently change every
+# decode in the process. Pass `locale=` to `flow.decode_flow` or `flow.decode_batch_flow` instead;
+# `None` there restores the bare URL. The decoders and `decode()` do not expose it.
+DEFAULT_LOCALE: Mapping[str, str] = MappingProxyType({"hl": "en-US", "gl": "US", "ceid": "US:en"})
 
 # The protobuf tag the frame opens with, and what an unwrapped token starts with when it is
 # a handle rather than a URL.
@@ -190,16 +202,24 @@ def embedded_url(token: str) -> str | None:
     return unwrapped if _is_plausible_url(unwrapped) else None
 
 
-def params_urls(token: str) -> tuple[str, ...]:
+def params_urls(token: str, locale: Mapping[str, str] | None = DEFAULT_LOCALE) -> tuple[str, ...]:
     """Article-page URLs to try, in order, to obtain the signature and timestamp.
 
     Google serves the attributes from either path; which one works varies, so
     the caller should try the next on a failure OR on a page that parses to
     nothing.
+
+    `locale` rides along to save a round trip: without it Google answers 302 to
+    this same path plus its own `hl`/`gl`/`ceid`, and refusal on this endpoint is
+    counted in requests. Measured on clean exits, that took a decode from three
+    requests to two. Not guaranteed -- a walled exit redirects anyway, overriding
+    `gl` to its own geography -- so this is a saving where it applies and costs
+    nothing where it does not. Pass None for the bare URL.
     """
+    query = f"?{urlencode(locale)}" if locale else ""
     return (
-        f"https://news.google.com/articles/{token}",
-        f"https://news.google.com/rss/articles/{token}",
+        f"https://news.google.com/articles/{token}{query}",
+        f"https://news.google.com/rss/articles/{token}{query}",
     )
 
 

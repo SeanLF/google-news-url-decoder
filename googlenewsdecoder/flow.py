@@ -16,12 +16,14 @@ This is the sans-I/O shape (sans-io.readthedocs.io), the same one `h11` uses.
 """
 
 
+from collections.abc import Mapping
+
 from . import protocol
 from .errors import TransportError
 from .limits import MAX_TOKEN_LENGTH
 
 
-def _fetch_params(token: str):
+def _fetch_params(token: str, locale=protocol.DEFAULT_LOCALE):
     """Yield article-page GETs until one parses; return (params, last_error).
 
     `yield from` passes `send()` and `throw()` straight through, so both flows drive this the
@@ -29,7 +31,7 @@ def _fetch_params(token: str):
     only one of them fell back to a default message, and only one carried the note below.
     """
     last_error = None
-    for url in protocol.params_urls(token):
+    for url in protocol.params_urls(token, locale):
         try:
             body = yield protocol.params_request(url)
         except TransportError as e:
@@ -45,12 +47,19 @@ def _fetch_params(token: str):
     return None, last_error or "Failed to fetch data attributes from Google News."
 
 
-def decode_flow(source_url: str, max_token_length: int | None = MAX_TOKEN_LENGTH):
+def decode_flow(
+    source_url: str,
+    max_token_length: int | None = MAX_TOKEN_LENGTH,
+    locale: Mapping[str, str] | None = protocol.DEFAULT_LOCALE,
+):
     """Yield the requests needed to decode `source_url`; return the result dict.
 
     Send each yielded `Request` and pass the response body back in. Throw a
     `TransportError` in to report a failed request -- the flow decides whether that
     is fatal or worth trying the next candidate URL.
+
+    `locale` rides on the article-page GET so Google does not spend a redirect adding it; see
+    `protocol.DEFAULT_LOCALE`.
     """
     token = protocol.article_id(source_url, max_length=max_token_length)
     if token is None:
@@ -67,7 +76,7 @@ def decode_flow(source_url: str, max_token_length: int | None = MAX_TOKEN_LENGTH
     # current feeds finds essentially only opaque handles, so the fast path would almost never
     # fire. `protocol.embedded_url` remains available for callers who want to make that
     # decision themselves; the library does not make it for them.
-    params, last_error = yield from _fetch_params(token)
+    params, last_error = yield from _fetch_params(token, locale)
     if not params:
         return {"status": False, "message": last_error}
 
@@ -127,7 +136,12 @@ async def drive_async(flow, transport, **kwargs) -> dict:
             return stop.value
 
 
-def decode_batch_flow(source_urls, max_token_length: int | None = MAX_TOKEN_LENGTH, chunk_size: int = 50):
+def decode_batch_flow(
+    source_urls,
+    max_token_length: int | None = MAX_TOKEN_LENGTH,
+    chunk_size: int = 50,
+    locale: Mapping[str, str] | None = protocol.DEFAULT_LOCALE,
+):
     """Decode many URLs, one signature fetch each plus one POST per chunk.
 
     Yields requests the same way `decode_flow` does; returns a list of result dicts
@@ -150,7 +164,7 @@ def decode_batch_flow(source_urls, max_token_length: int | None = MAX_TOKEN_LENG
             results[position] = {"status": False, "message": "Invalid Google News URL format."}
             continue
         # See decode_flow on why this does not short-circuit on an inline URL.
-        params, last_error = yield from _fetch_params(token)
+        params, last_error = yield from _fetch_params(token, locale)
         if not params:
             results[position] = {"status": False, "message": last_error}
             continue

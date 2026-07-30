@@ -16,6 +16,7 @@ import time
 import tracemalloc
 import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -323,6 +324,48 @@ class TestBatchContainsItsFailures:
     def test_an_unusable_chunk_size_is_rejected_not_silently_wrong(self, bad):
         with pytest.raises(ValueError):
             decode_batch([GOOGLE_URL], chunk_size=bad)
+
+
+class TestADecodeDoesNotSpendARequestOnALocaleRedirect:
+    """Google answers a bare `/articles/<token>` with a 302 to the same path plus its own
+    hl/gl/ceid, so a decode cost three round trips where two would do -- measured on clean exits,
+    and the refusal on this endpoint is counted in requests, so the third one is budget.
+
+    Sending the locale ourselves is a strict improvement or neutral: if Google ever redirects
+    anyway, the cost is what it already was.
+    """
+
+    def test_the_article_page_request_carries_a_locale(self):
+        urls = protocol.params_urls("TOKEN")
+        assert urls, "params_urls must still offer candidates"
+        for url in urls:
+            # Asserted on the parsed query, not the escaping. Whether the colon in `ceid` arrives
+            # raw or percent-encoded is wire-equivalent, so pinning one spelling would turn a
+            # cosmetic change into a failure reading "the locale change regressed".
+            assert parse_qs(urlsplit(url).query) == {"hl": ["en-US"], "gl": ["US"], "ceid": ["US:en"]}, url
+
+    def test_a_caller_can_ask_for_the_bare_url(self):
+        for url in protocol.params_urls("TOKEN", locale=None):
+            assert "?" not in url, url
+
+    def test_a_caller_can_choose_a_different_locale(self):
+        urls = protocol.params_urls("TOKEN", locale={"hl": "fr-CA", "gl": "CA", "ceid": "CA:fr"})
+        assert all("hl=fr-CA" in u for u in urls), urls
+
+    def test_the_flow_asks_for_the_url_the_locale_produced(self):
+        """The parameter has to reach the request, not just the helper. A default that the flow
+        does not pass through would look right in isolation and change nothing in practice.
+        """
+        seen = []
+
+        class Recorder:
+            def __call__(self, request, *, timeout=None, proxy=None):
+                seen.append(request.url)
+                raise TransportError("stop here")
+
+        decode(GOOGLE_URL, transport=Recorder())
+        assert seen, "the flow made no request"
+        assert all("hl=en-US" in url for url in seen if "/articles/" in url), seen
 
 
 class TestDecompressionIsBounded:
