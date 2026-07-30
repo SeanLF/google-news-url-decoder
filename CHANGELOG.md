@@ -152,7 +152,10 @@ and no rate-limit headers. Three things measured, in case they save you the expe
   better than datacenter and VPN addresses in the same window.
 - **IPv4 and IPv6 are different addresses**, so a dual-stack host has two budgets. Measured
   with one host's IPv6 refusing every request while its IPv4 answered in the same minute.
-- **Connection reuse dominates how much you get.** One arm per address, on eleven addresses
+- **Connection reuse buys a longer run**, though a later measurement showed pooled arms being
+  refused at 49-139 article fetches on 6-12 connections, which overlaps the unpooled range and
+  means it is not the dominant term. Pooling is still the right default and still the clearest
+  lever a caller controls. Original measurement: one arm per address, on eleven addresses
   never used before, each arm doing the same work: clients opening a fresh connection per
   request were refused 4 of 4, after 24-88 articles and 72-179 connections. Pooled clients
   were refused 1 of 5, the rest reaching the token supply's end at ~100 articles on 1-6

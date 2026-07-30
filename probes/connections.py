@@ -115,6 +115,9 @@ def run(label, fetch, supply):
     hops["n"] = 0
     kinds = {"article": 0, "consent": 0, "unknown": 0}
     refused_at = None
+    stalled_at = None
+    errors = []
+    consecutive = 0
     for i, tok in enumerate(supply, 1):
         try:
             body = fetch(article_url(tok))
@@ -124,21 +127,40 @@ def run(label, fetch, supply):
                 break
             # NOTE: a dead article and a body we could not classify both land in `unknown`.
             kinds["unknown"] += 1
-            continue
-        except Exception:
+            consecutive += 1
+            errors.append(f"HTTP {e.code}")
+        except Exception as e:
             kinds["unknown"] += 1
-            continue
-        if body is None:
-            refused_at = i
+            consecutive += 1
+            errors.append(type(e).__name__)
+        else:
+            if body is None:
+                refused_at = i
+                break
+            kinds[classify(body)] += 1
+            consecutive = 0
+            progress(i, len(supply), connections=connects["n"], round_trips=hops["n"])
+        # A refusal does not always arrive as a 429. One run stopped transferring and, before this
+        # probe had a timeout, hung forever; with a timeout it would instead have burned 30s per
+        # remaining token producing nothing. Five failures in a row means the run is over, and
+        # saying WHERE it ended and with what is the difference between a result and a shrug.
+        if consecutive >= 5:
+            stalled_at = i
             break
-        kinds[classify(body)] += 1
-        progress(i, len(supply), connections=connects["n"], round_trips=hops["n"])
     out[label + "_requests"] = sum(kinds.values()) + (1 if refused_at else 0)
     # Article fetches above, HTTP round trips here. The second is what a per-request budget is
     # spent in, and it is roughly double the first wherever a redirect is being followed.
     out[label + "_round_trips"] = hops["n"]
     out[label + "_connections"] = connects["n"]
     out[label + "_refused_at"] = refused_at
+    # Distinguished from a refusal on purpose: a 429 is Google saying no, five consecutive
+    # failures is the connection or the tunnel going quiet, and reading the second as the first
+    # would put a ceiling in the notes that Google never stated.
+    out[label + "_stalled_at"] = stalled_at
+    out[label + "_last_errors"] = errors[-5:]
+    out[label + "_ended"] = (
+        "refused" if refused_at else "stalled" if stalled_at else "ran out of tokens"
+    )
     out[label + "_kinds"] = kinds
 
 

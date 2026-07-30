@@ -73,11 +73,14 @@ stop around 80, and shared VPN exits stop between 22 and 43. Any constant baked 
 would be one of those numbers, and wrong for everyone else, which is why the package encodes
 none and leaves pacing to the caller's own transport wrapper.
 
-**Connection reuse dominates the budget.** One arm per address, on addresses never used
-before: unpooled clients refused 4 of 4 after 24-88 articles and 72-179 connections; pooled
-refused 1 of 5, the rest reaching ~100 articles on 1-6 connections. Not a clean per-connection
-count (the one pooled refusal came at 92 requests over 3 connections), so the mechanism is
-open, but the lever is not.
+**Connection reuse buys a longer run.** One arm per address, on addresses never used before:
+unpooled clients refused 4 of 4 after 24-88 articles and 72-179 connections; pooled refused 1 of
+5, the rest reaching ~100 articles on 1-6 connections. Not a clean per-connection count (the one
+pooled refusal came at 92 requests over 3 connections).
+
+This said "dominates the budget" until a later run measured pooled arms being refused at 49 to 139
+articles, which overlaps the unpooled range. Pooling is a real lever and still the right default,
+but it is not the dominant term. See below.
 
 Two arms on ONE address cannot measure this, and it took two confounded runs to see why. They
 share that address's budget, so the second arm inherits the remains -- 8 of 11 pooled arms
@@ -90,10 +93,21 @@ client was refused after 43 article fetches, and a pooled client on that same ad
 after was refused 12 times out of 12. So exhaustion belongs to the address and persists, and being
 pooled buys a longer run rather than an exemption. `pooled_vs_fresh.py`.
 
-Putting the two together, the model the measurements support is that connections cost, that the
-address is the unit that gets exhausted, and that pooling delays exhaustion without bypassing it.
-Whether REQUESTS cost anything on their own is still open: it needs connections held at one while
-requests climb, and the run that tried it stalled rather than being refused.
+**And pooled clients are refused too, sooner than the earlier runs suggested.** Three exits, one
+pooled arm each, pushed with a supply of 600 tokens so the feed could not be the constraint: all
+three were refused with a real 429, at 49, 128 and 139 article fetches on 9, 12 and 6 connections,
+which is 177 to 510 round trips. An earlier pooled run reached about 330 fetches on one connection
+and stopped transferring instead, which was read as a possible ceiling and was not one.
+
+Two things follow, and the second is uncomfortable. The relationship with connections survives:
+1 connection reached 102 to 330 fetches, 3 reached 92, 6 to 12 reached 49 to 139, and 66 to 153
+reached 26 to 76. But the spread BETWEEN exits at similar connection counts (49 against 139) is as
+large as the difference pooling makes, so "connection reuse dominates the budget" overstates it.
+Pooling helps; the address matters at least as much; and none of these addresses can be certified
+rested, since Proton recycles them and this harness had used all three earlier the same day.
+
+Whether REQUESTS cost anything on their own is therefore still open, and probably not answerable
+without addresses whose history you control.
 
 Token age is not a factor: tokens collected weeks earlier still decode.
 
