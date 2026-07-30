@@ -210,11 +210,14 @@ def params_urls(token: str, locale: Mapping[str, str] | None = DEFAULT_LOCALE) -
     nothing.
 
     `locale` rides along to save a round trip: without it Google answers 302 to
-    this same path plus its own `hl`/`gl`/`ceid`, and refusal on this endpoint is
-    counted in requests. Measured on clean exits, that took a decode from three
-    requests to two. Not guaranteed -- a walled exit redirects anyway, overriding
-    `gl` to its own geography -- so this is a saving where it applies and costs
-    nothing where it does not. Pass None for the bare URL.
+    this same path plus its own `hl`/`gl`/`ceid`. Measured on clean exits, that
+    took a decode from three requests to two. What it buys is latency; it is NOT
+    established that fewer requests buys more decodes per address, because every
+    refusal measured so far came from a run that also opened many connections, and
+    a single pooled connection reached ~660 round trips without one. Not
+    guaranteed either -- a walled exit redirects anyway, overriding `gl` to its own
+    geography -- so this saves where it applies and costs nothing where it does
+    not. Pass None for the bare URL.
     """
     query = f"?{urlencode(locale)}" if locale else ""
     return (

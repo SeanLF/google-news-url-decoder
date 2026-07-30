@@ -3,6 +3,7 @@ import gzip
 import json
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -123,6 +124,35 @@ def library_decode(token, timeout=30):
     return ("decoded" if result.get("status") else "failed"), detail
 
 
+_progress_start = [None]
+
+
+def progress(done, total, every=25, **extra):
+    """A line to stderr every `every` items, so a long probe can be told from a stopped one.
+
+    Not decoration. A 400-item run with no output stopped transferring at roughly 330 and then
+    hung on a socket read with no timeout; from outside, fifteen minutes of nothing looked like
+    slowness, and the only way to see otherwise was reading Docker's byte counters. Elapsed and
+    rate are included because they are what makes a stall obvious: the count stops moving.
+
+    stderr, so it never lands in the results file alongside the one JSON row.
+    """
+    # Timed from the first item rather than the first report, and reset per loop. One slot is
+    # enough because probes run their loops one after another, never concurrently.
+    if done <= 1 or _progress_start[0] is None:
+        _progress_start[0] = time.monotonic()
+    if done % every and done != total:
+        return
+    elapsed = time.monotonic() - _progress_start[0]
+    rate = done / elapsed if elapsed > 0 else float("nan")
+    fields = "".join(f" {k}={v}" for k, v in extra.items())
+    print(
+        f"progress: {done}/{total} in {elapsed:.0f}s ({rate:.1f}/s){fields}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def spend_until_refused(tokens, gap=0.4, on_each=None):
     """Fetch article pages until Google returns 429. Returns (n_clean, refused).
 
@@ -147,6 +177,7 @@ def spend_until_refused(tokens, gap=0.4, on_each=None):
         clean += 1
         if on_each is not None:
             on_each(i, token, body)
+        progress(i + 1, len(tokens), clean=clean)
         time.sleep(gap)
     return clean, False
 

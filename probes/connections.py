@@ -24,9 +24,10 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import urllib3
-from _common import HEADERS, article_url, classify, emit, require_tokens
+from _common import HEADERS, article_url, classify, dedupe, emit, fresh_tokens, progress
 
 LIMIT = int(os.environ.get("LIMIT", "120"))
+QUERIES = os.environ.get("QUERIES", "world,business,science,sports,health,technology").split(",")
 # ONE arm per address. Running both against the same exit cannot answer the question: they
 # share that address's budget, so whichever runs second inherits what the first left and is
 # refused early for reasons that have nothing to do with pooling. Measured: 8 of 11 pooled
@@ -34,6 +35,7 @@ LIMIT = int(os.environ.get("LIMIT", "120"))
 ARM = os.environ.get("ARM", "both")
 
 connects = {"n": 0}
+hops = {"n": 0}
 
 
 def _install_connection_counter():
@@ -48,6 +50,27 @@ def _install_connection_counter():
     at call time), so patching the module it lives in is enough and is the only patch that
     takes effect.
     """
+    # Round trips as well as connects. `*_requests` counts ARTICLE FETCHES, and each one follows
+    # a redirect or two, so reading it as a request count understated the real load by about half
+    # -- and "how many requests does one connection get" is the question this probe is asked.
+    # urllib3 recurses through urlopen once per hop, and urllib's opener calls http_response per
+    # response, so the two below are disjoint the same way the connect wrappers are.
+    real_urlopen = urllib3.PoolManager.urlopen
+
+    def counting_urlopen(self, method, url, *a, **kw):
+        hops["n"] += 1
+        return real_urlopen(self, method, url, *a, **kw)
+
+    urllib3.PoolManager.urlopen = counting_urlopen
+
+    real_http_response = urllib.request.HTTPErrorProcessor.http_response
+
+    def counting_http_response(self, request, response):
+        hops["n"] += 1
+        return real_http_response(self, request, response)
+
+    urllib.request.HTTPErrorProcessor.http_response = counting_http_response
+
     real_socket = socket.create_connection
     real_u3 = urllib3.util.connection.create_connection
 
@@ -65,17 +88,31 @@ def _install_connection_counter():
 
 _install_connection_counter()
 
-tokens = require_tokens(2)
+# Several feeds, because one yields about a hundred tokens and that was the binding constraint
+# on every single-connection run so far: `requests` came back equal to `tokens`, so `refused_at:
+# null` meant "ran out of articles to ask for", not "found no ceiling". Answering how far one
+# connection goes needs a supply larger than the answer.
+tokens = []
+for q in QUERIES:
+    if len(tokens) >= LIMIT * 2:
+        break
+    try:
+        tokens = dedupe(tokens + fresh_tokens(query=q.strip()))
+    except Exception as e:
+        print(f"query {q!r} failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+if len(tokens) < 2:
+    emit(error=f"only {len(tokens)} tokens from {len(QUERIES)} queries")
+    raise SystemExit(1)
 
-# Each arm gets half the supply, so LIMIT above len(tokens)//2 cannot be reached. Recorded as
-# asked for, not as spent: compare `*_requests` against it before reading a `refused_at: null`
-# as "never refused" rather than "ran out of tokens".
+# `limit` is what was asked for and `tokens` what was available: compare both against
+# `*_requests` before reading `refused_at: null` as "never refused".
 out = {"limit": LIMIT, "tokens": len(tokens)}
 
 
 def run(label, fetch, supply):
     """Fetch until refused or the supply runs out; report requests, connections, outcome mix."""
     connects["n"] = 0
+    hops["n"] = 0
     kinds = {"article": 0, "consent": 0, "unknown": 0}
     refused_at = None
     for i, tok in enumerate(supply, 1):
@@ -95,7 +132,11 @@ def run(label, fetch, supply):
             refused_at = i
             break
         kinds[classify(body)] += 1
+        progress(i, len(supply), connections=connects["n"], round_trips=hops["n"])
     out[label + "_requests"] = sum(kinds.values()) + (1 if refused_at else 0)
+    # Article fetches above, HTTP round trips here. The second is what a per-request budget is
+    # spent in, and it is roughly double the first wherever a redirect is being followed.
+    out[label + "_round_trips"] = hops["n"]
     out[label + "_connections"] = connects["n"]
     out[label + "_refused_at"] = refused_at
     out[label + "_kinds"] = kinds
@@ -124,7 +165,12 @@ pool = urllib3.PoolManager(
 
 
 def pooled_fetch(url):
-    resp = pool.request("GET", url, headers=HEADERS)
+    # urllib3's default timeout is None, i.e. wait forever, and the fresh arm above passes 25
+    # while this one passed nothing. A run of 400 stopped transferring at roughly 330 fetches and
+    # then hung indefinitely: no row, no error, and "slow" indistinguishable from "stopped". A
+    # refusal that arrives as a stalled socket rather than a 429 is a mode worth being able to
+    # see, and without a timeout it is the one mode this probe cannot report.
+    resp = pool.request("GET", url, headers=HEADERS, timeout=urllib3.Timeout(total=30))
     if resp.status == 429:
         return None
     return resp.data.decode("utf-8", "replace")
