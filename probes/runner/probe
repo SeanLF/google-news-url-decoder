@@ -28,10 +28,9 @@ LAB=${GNEWS_LAB_DIR:-$HOME/.gnews-lab}
 image=${GNEWS_PROBE_IMAGE:-gnews-probe}
 results="$LAB/results"
 
-# Pinned by digest, not `:latest`. Two reasons, and the second is the real one: gluetun's env
-# names drift (DOT and DNS_ADDRESS are already deprecated aliases), and the image carries the
-# bundled Proton server list that SERVER_HOSTNAMES resolves against. A harness whose whole
-# purpose is holding everything constant except the exit cannot float its server list.
+# Pinned by digest, not `:latest`, because the image carries the bundled Proton server list that
+# SERVER_HOSTNAMES resolves against. A harness whose purpose is holding everything constant
+# except the exit cannot float that. Its env names drift too.
 # To update: docker pull qmcgaw/gluetun:latest, then
 #   docker inspect --format '{{index .RepoDigests 0}}' qmcgaw/gluetun:latest
 gluetun=${GNEWS_GLUETUN_IMAGE:-qmcgaw/gluetun@sha256:e67bd4c664b103a6112a20e44384ce1cbe9394c41eb4de918693035699509956}
@@ -130,7 +129,11 @@ for kv in "$@"; do
       ;;
   esac
   case "$kv" in
-    SERVER_*|VPN_*|OPENVPN_*|WIREGUARD_*) tunnel_env+=(-e "$kv") ;;
+    # DNS_* included because DNS is a tunnel setting here, set just below. Without it, passing
+    # DNS_UPSTREAM_RESOLVER_TYPE=dot became a no-op env var on the probe container while the
+    # hardcoded value stood -- the misrouting this list exists to prevent, in the other
+    # direction. Later -e wins, so an argument overrides the default and the A/B is reproducible.
+    SERVER_*|VPN_*|OPENVPN_*|WIREGUARD_*|DNS_*|BLOCK_*) tunnel_env+=(-e "$kv") ;;
     *=*) probe_envs+=(-e "$kv") ;;
     *) echo "not a KEY=VAL argument: $kv" >&2; exit 2 ;;
   esac
@@ -144,13 +147,25 @@ if [ -z "$host_ip" ]; then
 fi
 
 emit_error() {
-  printf '{"exit":"%s","error":"%s"}\n' "$label" "$1" | tee -a "$results/$probe_name.jsonl"
+  # Same keys `emit()` puts on a good row. These are the rows a protocol or resolver comparison
+  # is actually about -- a tunnel that never came up is the failure being counted -- and without
+  # the labels they are the only rows that cannot be attributed to an arm.
+  printf '{"exit":"%s","vpn":"%s","dns":"%s","error":"%s"}\n' \
+    "$label" "$vpn_type" "$dns_mode" "$1" | tee -a "$results/$probe_name.jsonl"
   exit 0
 }
+
+# Two fixed plaintext resolvers, gluetun's caching proxy in front of them, and its blocklists
+# off. Holding one resolver set across every exit is the point: letting each Proton server hand
+# out its own resolver varies a thing this harness exists to hold constant. Recorded in each row
+# as `dns`, because it is not visible in the numbers otherwise.
+dns_mode=${GNEWS_DNS_MODE:-plain:1.1.1.1+9.9.9.9}
 
 docker run -d --name "$tunnel" \
   --cap-add=NET_ADMIN --device=/dev/net/tun \
   -e VPN_SERVICE_PROVIDER=protonvpn -e "VPN_TYPE=$vpn_type" \
+  -e DNS_UPSTREAM_RESOLVER_TYPE=plain -e DNS_UPSTREAM_PLAIN_ADDRESSES=1.1.1.1:53,9.9.9.9:53 \
+  -e BLOCK_MALICIOUS=off -e BLOCK_SURVEILLANCE=off -e BLOCK_ADS=off \
   "${secret_mounts[@]}" \
   "${tunnel_env[@]+"${tunnel_env[@]}"}" \
   "$gluetun" >/dev/null || emit_error "gluetun failed to start"
@@ -181,6 +196,7 @@ docker run --rm --name "probe-$label-$$" \
   -v "$root:/lib-src:ro" \
   -e PYTHONPATH=/lib-src \
   -e "EXIT_NAME=$label" -e "HOST_IP=$host_ip" -e "PROBE=$probe_name" \
+  -e "VPN_TYPE=$vpn_type" -e "DNS_MODE=$dns_mode" \
   "${probe_envs[@]+"${probe_envs[@]}"}" \
   --entrypoint /bin/bash "$image" /lib-src/probes/entrypoint.sh \
   | tee -a "$results/$probe_name.jsonl"

@@ -16,6 +16,10 @@ HEADERS = {"User-Agent": UA, "Accept-Encoding": "gzip"}
 # running the same probe from several addresses and comparing; ignorable otherwise.
 EXIT = os.environ.get("EXIT_NAME", "?")
 IP = os.environ.get("EXIT_IP", "?")
+# How this row was carried. Rows land in one file per probe, appended across runs, so two rows
+# from the same exit under different tunnels or resolvers are otherwise indistinguishable.
+VPN = os.environ.get("VPN_TYPE", "?")
+DNS = os.environ.get("DNS_MODE", "?")
 
 
 def article_url(token):
@@ -148,4 +152,4 @@ def spend_until_refused(tokens, gap=0.4, on_each=None):
 
 
 def emit(**fields):
-    print(json.dumps({"exit": EXIT, "ip": IP, **fields}), flush=True)
+    print(json.dumps({"exit": EXIT, "ip": IP, "vpn": VPN, "dns": DNS, **fields}), flush=True)

@@ -48,6 +48,21 @@ and refuses to run otherwise. Setup, credentials for either protocol, and the on
 knowing — `parallel` holds wall-clock constant, not the per-address budget — are in
 [docs/probe-harness.md](../docs/probe-harness.md).
 
+## What has been ruled out
+
+Three explanations for the throttle were formed and each killed by the next measurement. Recorded
+so nobody derives them again:
+
+| hypothesis | killed by |
+|---|---|
+| a rate limit | 70 requests at 10/s ran clean; 33 at 0.24/s were throttled |
+| a fixed quota | the slower rate hit the wall at a third of the volume |
+| novelty of distinct articles | 5 repeated articles throttled at 30, 4,331 distinct ones at 33 |
+
+Those measurements came from a laptop VPN session, one exit at a time, and ranged from 30 requests
+to 96+ under nominally identical conditions — a wider spread than any variable being manipulated,
+which is what motivated rotating exits automatically rather than trusting any single run.
+
 ## What to expect
 
 **Throttling varies enormously by address, so measure your own.** Across one wall-clock window

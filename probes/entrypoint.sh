@@ -9,7 +9,10 @@
 set -uo pipefail
 
 fail() {
-  printf '{"exit":"%s","error":"%s"}\n' "$EXIT_NAME" "$1"
+  # Carries the same labels a good row does: a failure to establish egress is exactly the kind of
+  # row a protocol or resolver comparison counts, so it must be attributable to an arm.
+  printf '{"exit":"%s","vpn":"%s","dns":"%s","error":"%s"}\n' \
+    "$EXIT_NAME" "${VPN_TYPE:-?}" "${DNS_MODE:-?}" "$1"
   exit 0
 }
 
