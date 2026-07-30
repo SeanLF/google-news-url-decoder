@@ -111,15 +111,11 @@ three were refused with a real 429, at 49, 128 and 139 article fetches on 9, 12 
 which is 177 to 510 round trips. An earlier pooled run reached about 330 fetches on one connection
 and stopped transferring instead, which was read as a possible ceiling and was not one.
 
-Two things follow, and the second is uncomfortable. The relationship with connections survives:
-1 connection reached 102 to 330 fetches, 3 reached 92, 6 to 12 reached 49 to 139, and 66 to 153
-reached 26 to 76. But the spread BETWEEN exits at similar connection counts (49 against 139) is as
-large as the difference pooling makes, so "connection reuse dominates the budget" overstates it.
-Pooling helps; the address matters at least as much; and none of these addresses can be certified
-rested, since Proton recycles them and this harness had used all three earlier the same day.
-
-Whether REQUESTS cost anything on their own is therefore still open, and probably not answerable
-without addresses whose history you control.
+Read those alongside the controlled run above rather than on their own. These three addresses had
+all been used earlier the same day, which is the confound that has bitten every version of this
+measurement, and the 20-arm run that controlled for it found no resolvable connection effect at
+all. What survives here is only the ordering of the raw counts, and the ordering is what the
+permutation test says cannot be distinguished from chance.
 
 ## What this harness cannot measure
 
