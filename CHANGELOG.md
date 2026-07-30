@@ -141,11 +141,13 @@ and no rate-limit headers. Three things measured, in case they save you the expe
   after 19-63 article GETs, unpooled.
 - **Only the article-page GET counts.** Batching collapses the POSTs, so it saves round trips
   without reducing exposure.
-- **What the budget is counted in is not settled.** Every refusal measured came from a run that
-  also opened many connections, so requests and connections rose together and neither can be
-  isolated from these numbers. A single pooled connection reached roughly 660 round trips without
-  a refusal. Treat the counts above as what happens to an unpooled client, and treat "fewer
-  requests buys more decodes" as unproven.
+- **What the budget is counted in is not settled, but exhaustion belongs to the address.** Pooled
+  and unpooled clients issue the same requests per article fetch, and unpooled is refused far
+  sooner, so connections cost something. Yet a pooled client on an address an unpooled one had
+  just exhausted was refused 12 of 12, so pooling delays exhaustion rather than exempting you
+  from it. Whether requests cost anything on their own is untested: it needs connections held at
+  one while requests climb. Treat the counts above as what happens to an unpooled client, and
+  "fewer requests buys more decodes" as unproven.
 - **How much you get depends on the address.** A residential connection fared several times
   better than datacenter and VPN addresses in the same window.
 - **IPv4 and IPv6 are different addresses**, so a dual-stack host has two budgets. Measured

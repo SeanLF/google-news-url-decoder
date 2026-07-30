@@ -85,6 +85,16 @@ refused at request 1 right after a fresh arm spent it. An earlier attempt failed
 `retries=False` left the pooled arm not following redirects, so it fetched no article at all
 and "survived longer" meant "did a third of the work". Use `ARM=` on separate, rested exits.
 
+**But pooling does not rescue a spent address.** One process, one tunnel, one address: an unpooled
+client was refused after 43 article fetches, and a pooled client on that same address immediately
+after was refused 12 times out of 12. So exhaustion belongs to the address and persists, and being
+pooled buys a longer run rather than an exemption. `pooled_vs_fresh.py`.
+
+Putting the two together, the model the measurements support is that connections cost, that the
+address is the unit that gets exhausted, and that pooling delays exhaustion without bypassing it.
+Whether REQUESTS cost anything on their own is still open: it needs connections held at one while
+requests climb, and the run that tried it stalled rather than being refused.
+
 Token age is not a factor: tokens collected weeks earlier still decode.
 
 **The interstitial is earned by replaying Google's own cookie.** From a walled address:
