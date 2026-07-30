@@ -96,7 +96,11 @@ import urllib3
 # its own first run.
 pool = urllib3.PoolManager(
     maxsize=1,
-    retries=urllib3.Retry(total=None, redirect=10, other=0, raise_on_status=False),
+    # connect and read pinned to 0 for the same reason as connections.py: left to default they are
+    # None, which means unbounded, and a retry storm would be indistinguishable from being served.
+    retries=urllib3.Retry(
+        total=None, connect=0, read=0, redirect=10, other=0, raise_on_status=False
+    ),
 )
 
 pooled_articles = pooled_429 = 0

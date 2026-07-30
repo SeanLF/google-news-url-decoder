@@ -37,7 +37,10 @@ except Exception as e:
     out["bare"] = f"error {type(e).__name__}"
 
 try:
-    http = urllib3.PoolManager(retries=urllib3.Retry(redirect=10, other=0, total=None))
+    # connect/read pinned to 0: left to default they are None, which is unbounded.
+    http = urllib3.PoolManager(
+        retries=urllib3.Retry(connect=0, read=0, redirect=10, other=0, total=None)
+    )
     resp = http.request("GET", article_url(tokens[1]), headers=HEADERS)
     record_body(out, "urllib3", resp.data.decode("utf-8", "replace"))
 except Exception as e:

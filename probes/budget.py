@@ -80,7 +80,8 @@ def _install_counter():
     with a ratio from the other, including across two different builds of the library.
 
     One blind spot either way: a pool-level retry recurses inside `HTTPConnectionPool.urlopen`
-    and is invisible here. The transport sets every Retry count to 0, so nothing retries today.
+    and is invisible here. The transport retries a failed connect once per redirect hop, so a run
+    against a flaky exit under-counts by however many of those fired.
     """
     patched = []
 

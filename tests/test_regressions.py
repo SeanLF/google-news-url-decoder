@@ -523,6 +523,116 @@ class TestTheTwoTransportsDecodeAlike:
             fetch("sync", f"http://127.0.0.1:{server.server_port}/cut")
 
 
+class TestOnlyAFailedConnectIsRetried:
+    """One retry, and only for the failure urllib3 can promise never arrived.
+
+    Everything that reached the endpoint costs a unit of the address's budget whether or not we
+    liked the answer, so retrying it spends a second unit to be told the same thing. A connect
+    that never completed sent no bytes. That is the whole line, and urllib3's counters draw it in
+    exactly one place: `connect`.
+    """
+
+    def test_a_failed_connect_is_retried_once(self):
+        """Driven by making the connect fail, because nothing else reaches that branch.
+
+        A pre-response drop looks like the same class of failure and is NOT retried, since urllib3
+        files it under `read` alongside read timeouts, and a read timeout on a throttled endpoint
+        means the request was received and stalled. There is no counter that separates the two.
+        """
+        import urllib3.util.connection
+
+        from googlenewsdecoder.transports import Urllib3Transport
+
+        with serving(fixed_body(b"ok"), keep_alive=True) as server:
+            url = f"http://127.0.0.1:{server.server_port}/x"
+            real = urllib3.util.connection.create_connection
+            attempts = {"n": 0}
+
+            def fail_once(*args, **kwargs):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise OSError("simulated connect failure")
+                return real(*args, **kwargs)
+
+            transport = Urllib3Transport()
+            try:
+                urllib3.util.connection.create_connection = fail_once
+                assert transport(Request("GET", url, {}), timeout=10) == "ok"
+            finally:
+                urllib3.util.connection.create_connection = real
+                transport.close()
+        assert attempts["n"] == 2, f"expected one connect retry, saw {attempts['n']} attempts"
+
+    def test_a_read_timeout_is_not_retried(self):
+        """The reverted half of this change, pinned so it cannot come back by accident.
+
+        urllib3's own note on the read branch says to assume the server began processing the
+        request. Retrying that spends a second unit of budget on an endpoint whose refusal mode
+        includes stalling, which is what `status=0` exists to prevent one flavour of.
+        """
+        from googlenewsdecoder.transports import Urllib3Transport
+
+        delivered = {"n": 0}
+
+        class Stall(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                delivered["n"] += 1
+                time.sleep(3)
+
+            def log_message(self, *args):
+                pass
+
+        with serving(Stall, keep_alive=True) as server:
+            url = f"http://127.0.0.1:{server.server_port}/slow"
+            transport = Urllib3Transport()
+            try:
+                with pytest.raises(TransportError):
+                    transport(Request("GET", url, {}), timeout=1)
+            finally:
+                transport.close()
+        assert delivered["n"] == 1, (
+            f"a read timeout was retried: the server received the request {delivered['n']} times, "
+            "which is a second unit of the address's budget spent for nothing"
+        )
+
+    def test_a_429_is_not_retried(self):
+        """Counted at the handler, not at the connection.
+
+        This asserted on accepted TCP connections, which cannot detect a status retry at all:
+        urllib3 drains the response and REUSES the keep-alive connection, so a version of this
+        transport retrying 429s three times passed the old assertion unchanged.
+        """
+        from googlenewsdecoder.transports import Urllib3Transport
+
+        delivered = {"n": 0}
+
+        class Refuse(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                delivered["n"] += 1
+                body = b"slow down"
+                self.send_response(429)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        with serving(Refuse, keep_alive=True) as server:
+            url = f"http://127.0.0.1:{server.server_port}/429"
+            transport = Urllib3Transport()
+            try:
+                with pytest.raises(TransportError, match="HTTP 429"):
+                    transport(Request("GET", url, {}), timeout=10)
+            finally:
+                transport.close()
+        assert delivered["n"] == 1, f"a 429 was retried: the server received {delivered['n']} requests"
+
+
 class TestHoldingADecoderKeepsOneConnection:
     """Connections are the resource Google's throttle is most sensitive to, so the difference
     between holding a decoder and building one per call is the difference that matters.

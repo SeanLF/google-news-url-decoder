@@ -182,7 +182,14 @@ def fresh_fetch(url):
 # returned 302 stubs and fetched no article at all -- it then "survived longer" only by
 # doing a third of the work, which invalidated the first run of this probe.
 pool = urllib3.PoolManager(
-    maxsize=1, retries=urllib3.Retry(total=None, redirect=10, other=0, raise_on_status=False)
+    maxsize=1,
+    # connect and read pinned to 0, not left to default. Omitted they are None, which `increment`
+    # never decrements and `is_exhausted` skips, so connect and read retries are UNBOUNDED -- in
+    # the probe whose entire output is a connection count. A retry storm against a flaky exit would
+    # inflate that count and be reported as Google's behaviour.
+    retries=urllib3.Retry(
+        total=None, connect=0, read=0, redirect=10, other=0, raise_on_status=False
+    ),
 )
 
 

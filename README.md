@@ -75,9 +75,10 @@ decode(url, transport=my_session_backed_callable) # your pooling, retries, traci
 
 Four things worth knowing before you rely on it:
 
-- **Requests time out after 15 seconds** (`limits.DEFAULT_TIMEOUT`), applied to connect and read
-  on both transports. `decode()` takes no `timeout=`; to change it, pass a transport that
-  supplies its own.
+- **Each attempt times out after 15 seconds** (`limits.DEFAULT_TIMEOUT`), applied to connect and read
+  on both transports. Note *attempt*, not decode: one decode follows redirects and retries a failed
+  connect once per hop, so its worst case is a small multiple of that, not 15 seconds.
+  `decode()` takes no `timeout=`; to change it, pass a transport that supplies its own.
 - **Responses are capped at 32 MiB decompressed** (`limits.MAX_RESPONSE_BYTES`), counted decoded
   because that is where a compressed bomb expands. Exceeding it raises `TransportError` rather
   than returning a truncated page, so it is one of the reasons a decode can fail.

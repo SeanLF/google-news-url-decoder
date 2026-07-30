@@ -306,10 +306,29 @@ class Urllib3Transport(_HeaderMixin):
                 return pool
             import urllib3
 
-            # Redirects yes, retries no: a retry on this endpoint spends budget without
-            # recovering it, and the caller decides that policy by wrapping the transport.
+            # Redirects yes. Everything that reached the endpoint, never.
+            #
+            # `connect=1` is the only retry here, and the reason is that a failed connect is the
+            # only failure urllib3 can promise did not arrive. `read` was tried and reverted:
+            # urllib3 classifies BOTH a pre-response drop and a read timeout as read errors, and
+            # its own comment on that branch says to assume the server began processing the
+            # request. A throttled endpoint stalls, so a read timeout here is likely and the
+            # retry would spend a second unit of the address's budget to be told nothing twice --
+            # the very thing `status=0` is for. Measured: a stalled request was delivered twice.
+            #
+            # `status=0` keeps a 429 from being retried, though `status_forcelist` being unset is
+            # what actually does that work; the 0 is belt and braces. Whether to back off is the
+            # caller's policy, through `stop_on_429` in the module docstring.
+            #
+            # NOT what recovers an idle pooled connection: urllib3 already discards a socket it
+            # detects as dropped and dials a fresh one, measured 3 of 3 against a server closing
+            # after every response with every counter at 0.
+            #
+            # Note the ceiling is per HOP, not per decode. urllib3 hands the next redirect hop the
+            # retries object from before the current hop consumed any, so the allowance replenishes
+            # each hop: a chain of N redirects permits up to N+1 connect attempts, not one.
             retries = urllib3.Retry(
-                total=None, connect=0, read=0, status=0, other=0, redirect=MAX_REDIRECTS,
+                total=None, connect=1, read=0, status=0, other=0, redirect=MAX_REDIRECTS,
                 raise_on_status=False,
             )
             if proxy is None:
