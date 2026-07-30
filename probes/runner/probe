@@ -80,7 +80,28 @@ if [ "$vpn_type" = "wireguard" ]; then
     echo "no WireGuard key at $key_file (see docs/probe-harness.md)" >&2
     exit 2
   fi
-  tr -d '[:space:]' < "$key_file" > "$secrets/wireguard_private_key"
+  key=$(tr -d '[:space:]' < "$key_file")
+  # Checked here rather than discovered as a tunnel that never goes healthy two minutes later.
+  # A key is 32 bytes base64, so 44 characters. The two failures worth naming separately are a
+  # paste that did not land, and pasting the whole `PrivateKey = ...` line instead of its value.
+  case "$key" in
+    [Pp]rivate[Kk]ey*)
+      echo "$key_file holds the whole 'PrivateKey = ...' line; it wants only the value" >&2
+      exit 2
+      ;;
+  esac
+  if [ ${#key} -ne 44 ]; then
+    echo "$key_file holds ${#key} characters; a WireGuard key is 44 (32 bytes base64)." >&2
+    echo "Copy the PrivateKey value from account.protonvpn.com -> Downloads -> WireGuard." >&2
+    exit 2
+  fi
+  case "$key" in
+    *[!A-Za-z0-9+/=]*)
+      echo "$key_file is not base64; see docs/probe-harness.md" >&2
+      exit 2
+      ;;
+  esac
+  printf '%s' "$key" > "$secrets/wireguard_private_key"
 else
   auth_file="$LAB/auth.txt"
   if [ ! -s "$auth_file" ]; then
