@@ -38,23 +38,23 @@ run if the answer is missing, unparseable as an address, or equal to the host's.
 
 It does **not** check that the address belongs to the exit you asked for. A wrong hostname in
 `exits.tsv` yields rows labelled `latvia` from a Norwegian address, and the label is what
-analysis groups by. The address is in every row, so this is recoverable after the fact — but only
+analysis groups by. The address is in every row, so this is recoverable after the fact -- but only
 if you look. Related: with a bare `SERVER_COUNTRIES`, gluetun re-picks a server whenever it
 reconnects, and its own healthcheck drives reconnection, so the address recorded at startup can
 go stale part-way through a long probe.
 
 ## Credentials
 
-**OpenVPN — what the existing setup already has.** Sign in to `account.protonvpn.com`, go to
+**OpenVPN -- what the existing setup already has.** Sign in to `account.protonvpn.com`, go to
 **Account → OpenVPN / IKEv2 username**, and put the username on line 1 of
 `$GNEWS_LAB_DIR/auth.txt` and the password on line 2. These are VPN-scoped credentials, not your
 Proton account login. This is the default (`VPN_TYPE=openvpn`).
 
-**WireGuard — one key for every server.** Sign in to `account.protonvpn.com` with your **Proton
+**WireGuard -- one key for every server.** Sign in to `account.protonvpn.com` with your **Proton
 account**, then **Downloads → WireGuard configuration**: name it, pick a platform and options,
 pick any server, **Create**, **Download**. The `.conf` is standard WireGuard; copy the
 `PrivateKey` value out of its `[Interface]` block into `$GNEWS_LAB_DIR/wireguard.key` and run with
-`VPN_TYPE=wireguard`. The same key authenticates every Proton server, so one config is enough —
+`VPN_TYPE=wireguard`. The same key authenticates every Proton server, so one config is enough --
 gluetun chooses the server, and the `Endpoint` and `PublicKey` in the file are not used.
 
 The OpenVPN credentials **cannot** produce a WireGuard key, so the dashboard step above is manual
@@ -90,7 +90,7 @@ change has no equivalent. gluetun can refresh that list at runtime if it matters
 
 `parallel` holds wall-clock constant. It does **not** give each probe its own budget. Two
 budget-spending probes on one exit in one window measure the second against the remains of the
-first: 8 of 11 arms once refused at request 1 for exactly this reason — the figure is recorded in
+first: 8 of 11 arms once refused at request 1 for exactly this reason -- the figure is recorded in
 [probes/README.md](../probes/README.md), which is also where the two confounded runs it took to
 notice are described. Split the exits, or rest them.
 
