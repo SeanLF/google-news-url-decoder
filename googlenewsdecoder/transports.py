@@ -30,9 +30,9 @@ construction, which is the behaviour the old urllib path reconstructed by hand.
 
 **Concurrency.** `protocol` is pure and stateless, so it is safe to share across threads,
 processes and event loops without qualification. `Urllib3Transport` holds a PoolManager per
-proxy behind a lock and is safe to share; sharing one is also what you want, since the
-throttle counts connections. `HttpxAsyncTransport` holds a client, which httpx supports for
-concurrent use within one event loop.
+proxy behind a lock and is safe to share; sharing one is also what you want, for the handshakes
+and sockets it saves. `HttpxAsyncTransport` holds a client, which httpx supports for concurrent
+use within one event loop.
 
 **Composition.** A transport is a callable, so wrapping one is ordinary decoration -- retries,
 caching, rate limiting and logging are all just another transport:
@@ -126,9 +126,9 @@ class _HeaderMixin:
 
 MAX_REDIRECTS = 10
 
-# Bytes we will read and throw away to keep a pooled connection alive after giving up on a
-# body. The throttle on this endpoint counts connections, so a small declared remainder is
-# worth discarding; an unknown or large one is the peer's number to choose, not ours.
+# Bytes we will read and throw away to keep a pooled connection alive after giving up on a body.
+# A small declared remainder is cheaper than the handshake it saves; an unknown or large one is the
+# peer's number to choose, not ours.
 MAX_DRAIN_BYTES = 1 << 20
 
 # Default number of proxies one transport keeps pools for, evicting least-recently-used.
@@ -261,14 +261,22 @@ class Urllib3Transport(_HeaderMixin):
     stripping wrong.
 
     One PoolManager per proxy, kept on the instance, up to `max_pools` of them and then
-    least-recently-used first. That is not only a latency saving: the throttle on this endpoint
-    counts CONNECTIONS, so an unpooled client is refused on every address tested after 65-110 of
-    them while a pooled one runs on a single connection. See `probes/connections.py`.
+    least-recently-used first. Fewer sockets, fewer handshakes, lower latency, and less load on
+    someone else's server.
 
-    Which is also why the cap is generous and adjustable. Rotating through one more proxy than
-    it holds evicts each pool just before you return to it, so every request opens a connection
-    -- worse, on this endpoint, than the descriptors the cap is there to bound. Rotating through
-    more than 128, pass `max_pools`. `close()` hands the sockets back.
+    What it is NOT, on the evidence: a way to get more decodes out of an address. That claim was
+    here and is withdrawn. Fourteen rested addresses, one arm each across two windows, pooled at
+    6-31 connections against unpooled at 104-595: refusal came at a median of 96 article fetches
+    against 86, which an exact permutation test puts at p = 0.22. The direction favours pooling
+    and the effect may well be real, but it is smaller than this can resolve and far smaller than
+    the 4-5x spread between addresses. The earlier measurement that showed a clean separation ran
+    two arms on one address, which shares its budget -- the confound `probes/README.md` documents.
+    See `probes/connections.py`.
+
+    The cap is generous and adjustable anyway, because rotating through one more proxy than it
+    holds evicts each pool just before you return to it, and rebuilding a pool per request costs
+    latency and sockets whatever it does to the budget. Rotating through more than 128, pass
+    `max_pools`. `close()` hands the sockets back.
     """
 
     def __init__(self, headers: dict | None = None, max_pools: int = MAX_POOLS):
@@ -506,7 +514,7 @@ class HttpxAsyncTransport(_HeaderMixin):
 
         Closing a streamed response whose body was never read makes httpcore discard the
         connection: measured one per hop, 5 connections for a 4-hop chain, where the sync
-        transport used 1. The throttle counts connections, so that is budget.
+        transport used 1, which is a handshake per hop for nothing.
 
         Draining reads RAW bytes and never decodes, so a compressed hop cannot expand past its
         declared length -- `aread()` here would decode, turning a 1 MiB gzipped 302 into a
@@ -659,8 +667,9 @@ def default_transport() -> "Urllib3Transport":
     """The process-wide default, shared so connections are reused across `decode()` calls.
 
     Constructing a transport per call gives a PoolManager per call and therefore a connection
-    per call -- measured 20 connections for 20 decodes, against 1 when shared. The throttle
-    counts connections, so that is the difference between running and being refused.
+    per call -- measured 20 connections for 20 decodes, against 1 when shared. Worth sharing for
+    the handshakes and sockets alone; a budget benefit has been looked for and not found at a
+    resolvable size, see `Urllib3Transport`.
     """
     global _default_transport
     with _default_lock:

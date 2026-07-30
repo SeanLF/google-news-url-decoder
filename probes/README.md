@@ -73,14 +73,26 @@ stop around 80, and shared VPN exits stop between 22 and 43. Any constant baked 
 would be one of those numbers, and wrong for everyone else, which is why the package encodes
 none and leaves pacing to the caller's own transport wrapper.
 
-**Connection reuse buys a longer run.** One arm per address, on addresses never used before:
-unpooled clients refused 4 of 4 after 24-88 articles and 72-179 connections; pooled refused 1 of
-5, the rest reaching ~100 articles on 1-6 connections. Not a clean per-connection count (the one
-pooled refusal came at 92 requests over 3 connections).
+**Connection reuse has no measurable effect on the budget.** This section said "dominates the
+budget" for a long time. It does not survive a controlled run.
 
-This said "dominates the budget" until a later run measured pooled arms being refused at 49 to 139
-articles, which overlaps the unpooled range. Pooling is a real lever and still the right default,
-but it is not the dominant term. See below.
+Twenty arms, one per address, across two wall-clock windows, on addresses this harness had never
+touched, with a 600-token supply so the feed was never the constraint:
+
+| arm | connections | refusals (article fetches) | median |
+|---|---|---|---|
+| pooled | 6-31 | 48, 69, 81, 88, 105, 120, 166, 189 | 96 |
+| unpooled | 104-595 | 29, 44, 85, 88, 125, 152 | 86 |
+
+A 10-fold difference in connections, and an exact permutation test on the means gives p = 0.22.
+The direction favours pooling and the effect may be real, but it is smaller than 14 arms can
+resolve and much smaller than the 4-5x spread between addresses. Resolving it would need about 82
+arms per side.
+
+The earlier measurement that showed a clean separation (unpooled 24-88, pooled reaching ~100) ran
+two arms per address, which share its budget: the confound described below. Pool anyway, for the
+handshakes and sockets, and because 595 connections for 125 fetches is rude. Do not pool expecting
+more decodes per address.
 
 Two arms on ONE address cannot measure this, and it took two confounded runs to see why. They
 share that address's budget, so the second arm inherits the remains -- 8 of 11 pooled arms
