@@ -344,6 +344,15 @@ class TestADecodeDoesNotSpendARequestOnALocaleRedirect:
             # cosmetic change into a failure reading "the locale change regressed".
             assert parse_qs(urlsplit(url).query) == {"hl": ["en-US"], "gl": ["US"], "ceid": ["US:en"]}, url
 
+    def test_the_smaller_article_page_is_tried_first(self):
+        """Both candidates carry the same two attributes, and `/rss/articles` is 118 KiB on the
+        wire against 167 for `/articles`, sampled over 8 tokens. Order is the whole saving, and
+        nothing else in the suite would notice it flipping back.
+        """
+        first, second = protocol.params_urls("TOKEN")
+        assert "/rss/articles/" in first, first
+        assert "/rss/articles/" not in second and "/articles/" in second, second
+
     def test_a_caller_can_ask_for_the_bare_url(self):
         for url in protocol.params_urls("TOKEN", locale=None):
             assert "?" not in url, url

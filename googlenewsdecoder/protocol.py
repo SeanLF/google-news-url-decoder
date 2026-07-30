@@ -205,9 +205,16 @@ def embedded_url(token: str) -> str | None:
 def params_urls(token: str, locale: Mapping[str, str] | None = DEFAULT_LOCALE) -> tuple[str, ...]:
     """Article-page URLs to try, in order, to obtain the signature and timestamp.
 
-    Google serves the attributes from either path; which one works varies, so
-    the caller should try the next on a failure OR on a page that parses to
-    nothing.
+    Google serves the attributes from either path, so the caller should try the
+    next on a failure OR on a page that parses to nothing.
+
+    `/rss/articles` goes first because it is the smaller page carrying the same two
+    attributes: 118 KiB on the wire against 167, both parsing on 8 of 8 tokens
+    sampled, within a kilobyte each time. The fallback means the worst case is one
+    extra request where the old order would have needed none, so this is a wager
+    that the smaller page keeps working, laid at about 29% of the bytes per decode.
+    A note here previously said which path works "varies"; nothing in the sample
+    above varied, and the claim had no measurement behind it.
 
     `locale` rides along to save a round trip: without it Google answers 302 to
     this same path plus its own `hl`/`gl`/`ceid`. Measured on clean exits, that
@@ -221,8 +228,8 @@ def params_urls(token: str, locale: Mapping[str, str] | None = DEFAULT_LOCALE) -
     """
     query = f"?{urlencode(locale)}" if locale else ""
     return (
-        f"https://news.google.com/articles/{token}{query}",
         f"https://news.google.com/rss/articles/{token}{query}",
+        f"https://news.google.com/articles/{token}{query}",
     )
 
 
