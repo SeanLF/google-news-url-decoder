@@ -39,6 +39,16 @@ if [ ! -f "$root/probes/$probe_name.py" ]; then
   echo "no such probe: $root/probes/$probe_name.py" >&2
   exit 2
 fi
+
+# The label becomes a container name, so docker's character set applies. Rejected here because
+# otherwise docker refuses on its own and the row reads "gluetun failed to start", which points
+# at the tunnel rather than at the typo. A label containing a space is the easy way to get here.
+case "$label" in
+  ""|*[!A-Za-z0-9_.-]*)
+    echo "label must be [A-Za-z0-9_.-]: ${label@Q}" >&2
+    exit 2
+    ;;
+esac
 mkdir -p "$results"
 
 # Suffixed with the pid: two overlapping runs on one label must not tear down each other's
