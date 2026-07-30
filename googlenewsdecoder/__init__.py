@@ -62,7 +62,21 @@ def decode(source_url: str, *, transport=None, proxy: str | None = None, interva
 async def decode_async(
     source_url: str, *, transport=None, proxy: str | None = None, interval: int | None = None
 ) -> dict:
-    """Decode one Google News URL asynchronously. Needs httpx unless you pass a transport."""
+    """Decode one Google News URL asynchronously. Needs httpx unless you pass a transport.
+
+    ONE URL. Calling this in a loop opens a connection per decode, measured 5 for 5, because it
+    builds a client, uses it and closes it. `decode()` avoids that with a process-wide shared
+    transport; an httpx client is bound to its event loop, so there is no equivalent to share
+    here safely. Google's throttle is sensitive to connection count, so for more than one URL
+    hold a decoder open instead, which measured 1 connection for the same 5:
+
+        async with GoogleDecoderAsync() as decoder:
+            for url in urls:
+                await decoder.decode_google_news_url(url)
+
+    Or pass your own `transport=` and keep it. `decode_batch` is better still when the URLs are
+    known up front, since it shares one POST across a chunk.
+    """
     decoder = GoogleDecoderAsync(proxy=proxy, transport=transport)
     try:
         return await decoder.decode_google_news_url(source_url, interval=interval)

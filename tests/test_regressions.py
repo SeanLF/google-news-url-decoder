@@ -523,6 +523,50 @@ class TestTheTwoTransportsDecodeAlike:
             fetch("sync", f"http://127.0.0.1:{server.server_port}/cut")
 
 
+class TestHoldingADecoderKeepsOneConnection:
+    """Connections are the resource Google's throttle is most sensitive to, so the difference
+    between holding a decoder and building one per call is the difference that matters.
+
+    `decode_async()` builds and closes a client per call, measured 5 connections for 5 decodes,
+    which is why its docstring says to hold a decoder for more than one URL. The sync side has no
+    such trap because `default_transport()` is shared process-wide. Both good paths are pinned
+    here; the bad one is documented rather than fixed, because an httpx client belongs to its
+    event loop and cannot be shared process-wide the way the sync pool can.
+    """
+
+    def _point_at(self, port, monkeypatch):
+        monkeypatch.setattr(
+            protocol,
+            "params_urls",
+            lambda token, locale=None: (f"http://127.0.0.1:{port}/a", f"http://127.0.0.1:{port}/b"),
+        )
+
+    def test_five_sync_decodes_share_one_connection(self, monkeypatch):
+        with serving(fixed_body(b"<html>no params</html>"), keep_alive=True) as server:
+            self._point_at(server.server_port, monkeypatch)
+            for _ in range(5):
+                decode(GOOGLE_URL)
+            accepted = server.accepted
+        assert accepted == 1, f"5 sync decodes opened {accepted} connections; the default is shared"
+
+    def test_five_async_decodes_through_one_decoder_share_one_connection(self, monkeypatch):
+        pytest.importorskip("httpx", reason="the async transport needs the [async] extra")
+
+        from googlenewsdecoder.decoder_async import GoogleDecoderAsync
+
+        with serving(fixed_body(b"<html>no params</html>"), keep_alive=True) as server:
+            self._point_at(server.server_port, monkeypatch)
+
+            async def go():
+                async with GoogleDecoderAsync() as decoder:
+                    for _ in range(5):
+                        await decoder.decode_google_news_url(GOOGLE_URL)
+
+            asyncio.run(go())
+            accepted = server.accepted
+        assert accepted == 1, f"5 decodes through one decoder opened {accepted} connections"
+
+
 class TestTheSyncTransportsPoolsHaveALifetime:
     """A PoolManager per proxy, kept forever, on a library whose whole reason to pool is a
     throttle counted per address. Rotating proxies is the normal way to work around that, so the
