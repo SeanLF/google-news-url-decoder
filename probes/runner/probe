@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Run one probe on one VPN exit. gluetun holds the tunnel; the probe container borrows its
+# network namespace.
+#
+#   probes/runner/probe <label> <probe-name> [KEY=VAL ...]
+#   probes/runner/probe latvia walled SERVER_HOSTNAMES=node-lv-01.protonvpn.net
+#   probes/runner/probe latvia budget SERVER_HOSTNAMES=node-lv-01.protonvpn.net LIMIT=60
+#
+# KEY=VAL arguments are routed by prefix: SERVER_*, VPN_*, OPENVPN_* and WIREGUARD_* configure
+# the tunnel, everything else is passed to the probe. So one flat argument list drives both, and
+# a typo in a probe knob cannot silently become a tunnel setting.
+#
+# Credentials and outputs live in $GNEWS_LAB_DIR, outside this repo, because they are secrets.
+# See docs/probe-harness.md.
+set -uo pipefail
+
+if [ $# -lt 2 ]; then
+  echo "usage: $0 <label> <probe-name> [KEY=VAL ...]" >&2
+  exit 2
+fi
+
+label=$1
+probe_name=$2
+shift 2
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+LAB=${GNEWS_LAB_DIR:-$HOME/.gnews-lab}
+image=${GNEWS_PROBE_IMAGE:-gnews-probe}
+results="$LAB/results"
+
+# Pinned by digest, not `:latest`. Two reasons, and the second is the real one: gluetun's env
+# names drift (DOT and DNS_ADDRESS are already deprecated aliases), and the image carries the
+# bundled Proton server list that SERVER_HOSTNAMES resolves against. A harness whose whole
+# purpose is holding everything constant except the exit cannot float its server list.
+# To update: docker pull qmcgaw/gluetun:latest, then
+#   docker inspect --format '{{index .RepoDigests 0}}' qmcgaw/gluetun:latest
+gluetun=${GNEWS_GLUETUN_IMAGE:-qmcgaw/gluetun@sha256:e67bd4c664b103a6112a20e44384ce1cbe9394c41eb4de918693035699509956}
+
+if [ ! -f "$root/probes/$probe_name.py" ]; then
+  echo "no such probe: $root/probes/$probe_name.py" >&2
+  exit 2
+fi
+mkdir -p "$results"
+
+# Suffixed with the pid: two overlapping runs on one label must not tear down each other's
+# tunnel, and the early exits below fire the trap.
+tunnel="gluetun-$label-$$"
+
+secrets=$(mktemp -d)
+cleanup() {
+  rm -rf "$secrets"
+  docker rm -f "$tunnel" >/dev/null 2>&1
+}
+trap cleanup EXIT TERM
+# INT is deliberately absent: bash sets an asynchronous child's SIGINT to ignore when job
+# control is off, and a signal ignored on entry cannot be trapped, so trapping it here would
+# only look like it worked. `parallel` signals TERM instead.
+
+# --- credentials -------------------------------------------------------------------------
+# Through gluetun's /run/secrets files, NOT the environment. Docker copies --env-file contents
+# into the container's Config.Env, where `docker inspect` shows them in clear text and they
+# survive until the container is removed. Files mounted read-only never reach Config.Env, and
+# gluetun redacts them in its own logs (`User: [set]`).
+tunnel_env=()
+
+# VPN_TYPE is read from the arguments as well as the environment. It also matches the VPN_*
+# routing rule below, so taking it only from the environment meant `probe x y VPN_TYPE=wireguard`
+# wrote OpenVPN credentials and then flipped gluetun to WireGuard with no key -- surfacing as an
+# unexplained "tunnel never became healthy" rather than as the mistake it is.
+vpn_type=${VPN_TYPE:-openvpn}
+for kv in "$@"; do
+  case "$kv" in VPN_TYPE=*) vpn_type=${kv#VPN_TYPE=} ;; esac
+done
+
+if [ "$vpn_type" = "wireguard" ]; then
+  # Proton's WireGuard key cannot be fetched with the OpenVPN credentials. Download one config
+  # from account.protonvpn.com and save its PrivateKey here; one key works for every server.
+  key_file="$LAB/wireguard.key"
+  if [ ! -s "$key_file" ]; then
+    echo "no WireGuard key at $key_file (see docs/probe-harness.md)" >&2
+    exit 2
+  fi
+  tr -d '[:space:]' < "$key_file" > "$secrets/wireguard_private_key"
+else
+  auth_file="$LAB/auth.txt"
+  if [ ! -s "$auth_file" ]; then
+    echo "no OpenVPN credentials at $auth_file (see docs/probe-harness.md)" >&2
+    exit 2
+  fi
+  sed -n 1p "$auth_file" | tr -d '\r\n' > "$secrets/openvpn_user"
+  sed -n 2p "$auth_file" | tr -d '\r\n' > "$secrets/openvpn_password"
+fi
+chmod 600 "$secrets"/*
+
+secret_mounts=()
+for f in "$secrets"/*; do
+  secret_mounts+=(-v "$f:/run/secrets/$(basename "$f"):ro")
+done
+
+# --- route the KEY=VAL arguments ---------------------------------------------------------
+probe_envs=()
+for kv in "$@"; do
+  case "$kv" in
+    *$'\n'*)
+      # A newline would write a second env-file/-e line, so a value could inject any gluetun
+      # setting -- FIREWALL=off among them, which is the kill switch this design leans on.
+      echo "value contains a newline: ${kv%%=*}" >&2
+      exit 2
+      ;;
+  esac
+  case "$kv" in
+    SERVER_*|VPN_*|OPENVPN_*|WIREGUARD_*) tunnel_env+=(-e "$kv") ;;
+    *=*) probe_envs+=(-e "$kv") ;;
+    *) echo "not a KEY=VAL argument: $kv" >&2; exit 2 ;;
+  esac
+done
+
+# --- bring up the exit -------------------------------------------------------------------
+host_ip=$(curl -sf --max-time 8 https://api.ipify.org || true)
+if [ -z "$host_ip" ]; then
+  echo "could not determine this machine's public address; refusing to run" >&2
+  exit 1
+fi
+
+emit_error() {
+  printf '{"exit":"%s","error":"%s"}\n' "$label" "$1" | tee -a "$results/$probe_name.jsonl"
+  exit 0
+}
+
+docker run -d --name "$tunnel" \
+  --cap-add=NET_ADMIN --device=/dev/net/tun \
+  -e VPN_SERVICE_PROVIDER=protonvpn -e "VPN_TYPE=$vpn_type" \
+  "${secret_mounts[@]}" \
+  "${tunnel_env[@]+"${tunnel_env[@]}"}" \
+  "$gluetun" >/dev/null || emit_error "gluetun failed to start"
+
+# gluetun ships a HEALTHCHECK that tests egress, so its health is the readiness signal, and its
+# kill switch means nothing can leave before then -- a probe cannot accidentally measure this
+# laptop. Bad credentials leave it running and unhealthy forever, so a stopped container is
+# checked too rather than waiting out the whole timeout.
+healthy=""
+for _ in $(seq 1 60); do
+  sleep 2
+  state=$(docker inspect -f '{{.State.Running}} {{.State.Health.Status}}' "$tunnel" 2>/dev/null || echo "gone gone")
+  case "$state" in
+    "true healthy") healthy=yes; break ;;
+    "false "*|"gone gone") break ;;
+  esac
+done
+
+if [ -z "$healthy" ]; then
+  emit_error "tunnel never became healthy: $(docker logs --tail 3 "$tunnel" 2>&1 | tr -d '"' | tr '\n' ' ')"
+fi
+
+# --- run the probe inside that exit ------------------------------------------------------
+# googlenewsdecoder is uninstalled in the image, so PYTHONPATH is the only way this import can
+# resolve: what runs is the working tree, not a copy of it.
+docker run --rm --name "probe-$label-$$" \
+  --network "container:$tunnel" \
+  -v "$root:/lib-src:ro" \
+  -e PYTHONPATH=/lib-src \
+  -e "EXIT_NAME=$label" -e "HOST_IP=$host_ip" -e "PROBE=$probe_name" \
+  "${probe_envs[@]+"${probe_envs[@]}"}" \
+  --entrypoint /bin/bash "$image" /lib-src/probes/entrypoint.sh \
+  | tee -a "$results/$probe_name.jsonl"

@@ -33,15 +33,20 @@ nothing you did not already learn.
 
 ## Running one across VPN exits
 
-Throttling is per address, so the interesting runs are the ones that hold everything constant
-except the exit. `entrypoint.sh` is the in-container half of that: it brings up the tunnel,
-refuses to continue unless egress actually changed, and then runs `$PROBE`. The driver that
-calls it — building the image, mounting one exit's config, fanning out across exits — is **not
-in this repo**, because it carries VPN credentials. It lives in a gitignored directory outside
-the tree, and it mounts this directory into the container, so these files are what runs.
+Throttling is per address, so the interesting runs hold everything constant except the exit.
+`runner/` does that, with [gluetun](https://github.com/qdm12/gluetun) holding the tunnel:
 
-That means a docstring here saying `./probe <exit> <probe>` refers to that out-of-tree driver.
-A fresh clone can run the probes directly, as above, from whatever connection it happens to have.
+```sh
+export GNEWS_LAB_DIR=~/.gnews-lab            # credentials and results, never in this repo
+docker build -f probes/runner/Dockerfile -t gnews-probe .
+probes/runner/probe latvia walled SERVER_HOSTNAMES=node-lv-01.protonvpn.net
+probes/runner/parallel budget LIMIT=60
+```
+
+`entrypoint.sh` is the in-container half: it confirms which address we are actually leaving from
+and refuses to run otherwise. Setup, credentials for either protocol, and the one trap worth
+knowing — `parallel` holds wall-clock constant, not the per-address budget — are in
+[docs/probe-harness.md](../docs/probe-harness.md).
 
 ## What to expect
 

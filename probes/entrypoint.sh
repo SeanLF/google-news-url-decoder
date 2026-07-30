@@ -1,41 +1,46 @@
 #!/usr/bin/env bash
-# In-container half of ./probe: bring up the tunnel, confirm egress actually moved, run the probe.
+# In-container half of probes/runner/probe: confirm which address we are actually leaving from,
+# then run the probe. One JSON line either way.
+#
+# This used to bring the tunnel up itself with openvpn and poll an address service until egress
+# changed. gluetun owns the tunnel now, so what is left is the check -- and the check still
+# matters: a probe that measures the host connection while labelling the row as a remote exit
+# put a bogus row in a survey once already.
 set -uo pipefail
 
-openvpn --config /configs/only.ovpn --auth-user-pass /auth.txt --auth-nocache \
-        --daemon --log /tmp/openvpn.log
+fail() {
+  printf '{"exit":"%s","error":"%s"}\n' "$EXIT_NAME" "$1"
+  exit 0
+}
 
 if [ -z "${HOST_IP:-}" ]; then
-  # Empty rather than unset, so `set -u` does not catch it. Without a host address there is
-  # nothing to compare against, and every check below would pass vacuously.
-  printf '{"exit":"%s","error":"HOST_IP is empty; cannot tell the tunnel apart from the host"}\n' "$EXIT_NAME"
-  exit 0
+  # Empty rather than unset, so `set -u` does not catch it. With no host address there is
+  # nothing to compare against and every check below would pass vacuously.
+  fail "HOST_IP is empty; cannot tell the tunnel apart from the host"
 fi
 
+# Asked of a third party rather than of gluetun. Its control server would need an auth config
+# mounted -- current versions answer /v1/publicip/ip with 401 by default -- and it derives that
+# address by querying an address service anyway, so this is the same source one hop closer, and
+# it is what the outside world actually sees. One request, against a budget of roughly a hundred.
 EXIT_IP=""
-for _ in $(seq 1 25); do
-  sleep 2
-  # -f so an HTTP error is a failure rather than an error page treated as an address, and a
-  # shape check because a captive portal answers 200 with prose. The old test was "non-empty
-  # and different from the host", which any of those satisfy -- and being handed a body that
-  # is not an address is exactly how a bogus row got into a survey once already.
+for _ in $(seq 1 20); do
+  # -f so an HTTP error is a failure rather than an error page treated as an address.
   candidate=$(curl -sf --max-time 5 https://api.ipify.org || true)
-  # Hex and colons allowed as well as dots: an IPv6 exit is a legitimate answer here, and the
-  # two are separate budgets, so silently rejecting one would look like a dead tunnel.
-  case "$candidate" in
-    *[!0-9.:a-fA-F]*|"") continue ;;
-  esac
-  if [ "$candidate" != "$HOST_IP" ]; then
+  # Parsed, not pattern-matched. A glob that merely allows hex, dots and colons also accepts
+  # ".", "0", "404", "cafe" and "999.999.999.999", every one of which then differs from HOST_IP
+  # and so passes as an exit address. Python is already in this image, and IPv6 has to be
+  # accepted here -- the two families are separate budgets, so rejecting one looks like a dead
+  # tunnel rather than a working one.
+  if [ -n "$candidate" ] && python -c 'import ipaddress,sys; ipaddress.ip_address(sys.argv[1])' "$candidate" 2>/dev/null; then
     EXIT_IP=$candidate
     break
   fi
+  sleep 2
 done
 
-if [ -z "$EXIT_IP" ]; then
-  printf '{"exit":"%s","error":"tunnel never came up or egress did not change","log":"%s"}\n' \
-    "$EXIT_NAME" "$(tail -1 /tmp/openvpn.log 2>/dev/null | tr -d '"')"
-  exit 0
-fi
+[ -n "$EXIT_IP" ] || fail "could not determine the egress address from inside the tunnel"
+[ "$EXIT_IP" != "$HOST_IP" ] || fail "egress address equals the host address; the tunnel is not carrying traffic"
 
 export EXIT_IP
-exec python "/probes/${PROBE}.py"
+exec python "/lib-src/probes/${PROBE}.py"

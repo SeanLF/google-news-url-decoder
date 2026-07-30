@@ -1,0 +1,23 @@
+# Copy to $GNEWS_LAB_DIR/exits.tsv and edit. Label, TAB, gluetun selection.
+#
+# The label names the row in results/, so keep it stable: comparing an address across days is
+# the point. The selection is passed to gluetun verbatim, so anything it accepts works --
+# SERVER_HOSTNAMES pins one server, SERVER_COUNTRIES lets it choose within a country.
+#
+# Pin a hostname when you want the same exit twice; a country will wander between runs, and the
+# throttle is per address, so a wandering exit quietly changes the thing being measured. The
+# address is recorded in every row either way, so you can always tell after the fact.
+#
+# List what is available:
+#   docker run --rm --entrypoint /gluetun-entrypoint qmcgaw/gluetun format-servers -protonvpn
+#
+# Nine exits were in use before this harness moved to gluetun. Eight survive; Nicaragua is
+# absent from gluetun's bundled Proton list, so NI-1 has no equivalent here.
+dominican-republic	SERVER_HOSTNAMES=node-do-01.protonvpn.net
+ecuador	SERVER_HOSTNAMES=node-ec-01.protonvpn.net
+israel	SERVER_HOSTNAMES=node-il-04.protonvpn.net
+korea	SERVER_HOSTNAMES=node-kr-03.protonvpn.net
+latvia	SERVER_HOSTNAMES=node-lv-01.protonvpn.net
+norway	SERVER_HOSTNAMES=node-no-05.protonvpn.net
+tanzania	SERVER_HOSTNAMES=tz-03.protonvpn.net
+united-states	SERVER_HOSTNAMES=node-us-119.protonvpn.net

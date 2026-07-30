@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# The same probe on every exit at once, so wall-clock is held constant.
+#
+#   probes/runner/parallel <probe-name> [KEY=VAL ...]
+#
+# Exits come from $GNEWS_LAB_DIR/exits.tsv: a label, then one or more tab-separated KEY=VAL
+# fields naming the gluetun selection. See exits.tsv.example.
+#
+# Sequential runs spread over half an hour and reintroduce time-of-day as a variable, which is
+# one of the things this harness exists to rule out.
+#
+# One warning, learned the hard way: this holds wall-clock constant, not the address budget. Two
+# BUDGET-SPENDING probes must not run on the same exit in one window -- the second inherits what
+# the first spent and measures the remains. Split the exits, or rest them. The 8-of-11 figure in
+# probes/README.md is what that looks like when you forget.
+set -uo pipefail
+
+if [ $# -lt 1 ]; then
+  echo "usage: $0 <probe-name> [KEY=VAL ...]" >&2
+  exit 2
+fi
+
+here=$(cd "$(dirname "$0")" && pwd)
+probe_name=$1
+shift
+
+LAB=${GNEWS_LAB_DIR:-$HOME/.gnews-lab}
+exits_file=${GNEWS_EXITS:-$LAB/exits.tsv}
+
+if [ ! -s "$exits_file" ]; then
+  echo "no exit list at $exits_file (copy $here/exits.tsv.example and edit)" >&2
+  exit 2
+fi
+
+pids=()
+# Ctrl-C would otherwise orphan every arm: bash sets an asynchronous child's SIGINT to ignore
+# when job control is off, so the children cannot trap it and keep running with their tunnels up
+# and their credentials mounted, while the operator believes they cancelled. TERM is not ignored,
+# and each probe traps it, so relaying TERM is what actually tears things down.
+relay() {
+  trap - INT TERM
+  [ ${#pids[@]} -gt 0 ] && kill -TERM "${pids[@]}" 2>/dev/null
+  wait
+  exit 130
+}
+trap relay INT TERM
+
+count=0
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in ""|\#*) continue ;; esac
+  # Tab-separated so a value may contain spaces. `SERVER_COUNTRIES=United States` word-split
+  # when this passed an unquoted string, and "States" was then rejected as not a KEY=VAL
+  # argument -- silently breaking 20 of the countries Proton offers, including the US.
+  IFS=$'\t' read -r -a fields <<< "$line"
+  label=${fields[0]}
+  "$here/probe" "$label" "$probe_name" "${fields[@]:1}" "$@" &
+  pids+=($!)
+  count=$((count + 1))
+done < "$exits_file"
+
+if [ "$count" -eq 0 ]; then
+  echo "no exits in $exits_file" >&2
+  exit 2
+fi
+
+# Bare `wait` returns 0 whatever the children did, so a survey in which every arm refused to
+# launch would be indistinguishable from a clean one. Tunnel failures still exit 0 by design --
+# they emit a row saying so -- and this catches the ones that emit nothing at all.
+failed=0
+for pid in "${pids[@]}"; do
+  wait "$pid" || failed=$((failed + 1))
+done
+
+if [ "$failed" -gt 0 ]; then
+  echo "$failed of $count arms failed before emitting a row" >&2
+  exit 1
+fi
